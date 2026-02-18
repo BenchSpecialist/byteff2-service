@@ -26,31 +26,31 @@ if [ ! -w "$(dirname "$OPENMM_DIR")" ]; then
     exit 1
 fi
 
-TOP_LEVEL_DIR=$(pwd)
+# set top level dir to parent of script
+TOP_LEVEL_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
-rm -rf "${TOP_LEVEL_DIR}/openmm"
-rm -rf "${TOP_LEVEL_DIR}/openmm-velocityVerlet"
+echo $TOP_LEVEL_DIR & pwd && ls && cd ${TOP_LEVEL_DIR}
 
 # Install openmm
-git clone --branch 8.3.1 --single-branch https://github.com/openmm/openmm.git
+# git clone --branch 8.3.1 --single-branch https://github.com/openmm/openmm.git
 cd openmm
 git am ${TOP_LEVEL_DIR}/amoeba_scale_cpu.patch
 git am ${TOP_LEVEL_DIR}/amoeba_scale_cuda.patch
 cp "${TOP_LEVEL_DIR}/build_openmm.sh" ./
-./build_openmm.sh ${OPENMM_DIR}
+bash -xe ./build_openmm.sh ${OPENMM_DIR}
 cd output
-./install.sh
+bash -xe ./install.sh
 cd ${TOP_LEVEL_DIR}
 # test openmm installation
 # python3 -m openmm.testInstallation
 
 # Install openmm-velocityVerlet
-git clone https://github.com/z-gong/openmm-velocityVerlet.git
+# git clone https://github.com/z-gong/openmm-velocityVerlet.git
 cd openmm-velocityVerlet
 cp "${TOP_LEVEL_DIR}/build_openmm_vv.sh" ./
-./build_openmm_vv.sh ${OPENMM_DIR}
+bash -xe ./build_openmm_vv.sh ${OPENMM_DIR}
 cd output
-./install.sh
+bash -xe ./install.sh
 cd ${TOP_LEVEL_DIR}
 
 # Environment variables

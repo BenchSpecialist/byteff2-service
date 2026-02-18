@@ -104,7 +104,7 @@ cat << EOF > ${OUTPUT_DIR}/install.sh
 ## Installs Python wrappers
 OPENMM_DIR="${OPENMM_DIR}"
 tar -C \${OPENMM_DIR} -xvf ${PROJECT}.tar.gz && \\
-  python3 -m pip install --no-cache-dir --no-index --force-reinstall *.whl
+  python3 -m pip install --no-cache-dir --no-index --force-reinstall --ignore-installed *.whl
 
 ## Uninstalls compiled libs
 # rm -rf \${OPENMM_DIR}/include/openmm/VVIntegrator.h
