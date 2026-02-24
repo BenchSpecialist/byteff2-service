@@ -56,5 +56,5 @@ def test_upload_config_lazy_manager(monkeypatch):
     s3_path = s3_util.upload_config("task-001", {"a": 1})
 
     assert call_count["count"] == 1
-    assert s3_path == "test-bucket/configs/task-001/config.json"
+    assert s3_path == "test-bucket/task-001/config.json"
     assert len(put_calls) == 1
