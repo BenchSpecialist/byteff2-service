@@ -13,28 +13,22 @@ import json
 import logging
 from enum import Enum
 from pathlib import Path
-from datetime import datetime, timezone
-from dataclasses import dataclass, asdict
+from dataclasses import asdict
 from functools import lru_cache
-from typing import Optional, Dict, Any, Literal
+from typing import Optional, Dict, Any
 
 import boto3
 from botocore.exceptions import ClientError
 
+from .common import (CONFIG_KEY_TEMPLATE, RESULT_KEY_TEMPLATE, Progress, MDProgress,
+    STATUS_FILE_KEY_TEMPLATE, DEFAULT_BUCKET_NAME) # yapf: disable
+
 logger = logging.getLogger(__name__)
 
-_DEFAULT_BUCKET_NAME = "byteff2-jobs"
-
 S3_ENDPOINT_URL = os.environ.get("S3_ENDPOINT_URL")
-BUCKET = os.environ.get("S3_BUCKET_NAME", _DEFAULT_BUCKET_NAME)
+BUCKET = os.environ.get("S3_BUCKET_NAME", DEFAULT_BUCKET_NAME)
 S3_ACCESS_KEY = os.environ.get("S3_ACCESS_KEY")
 S3_SECRET_KEY = os.environ.get("S3_SECRET_KEY")
-
-# S3 object key template for job configuration file
-CONFIG_KEY_TEMPLATE = "configs/{job_id}/config.json"
-# S3 object key template for job result file
-RESULT_KEY_TEMPLATE = "results/{job_id}/{file_or_dir_name}"
-STATUS_FILE_KEY_TEMPLATE = "results/{job_id}/status.json"
 
 
 class S3FileManager:
@@ -288,8 +282,6 @@ class S3FileManager:
 
 
 ########################################################
-
-
 @lru_cache(maxsize=1)
 def _get_manager() -> S3FileManager:
     """
@@ -333,66 +325,40 @@ def download_config(task_name: str, local_path: Optional[Path] = None) -> Dict[s
     config_path = CONFIG_KEY_TEMPLATE.format(job_id=task_name)
 
     try:
-        # Download config file as bytes
         config_bytes = _get_manager().download(object_key=config_path, return_bytes=True)
-        config_json = config_bytes.decode('utf-8')
-        config_data = json.loads(config_json)
-
-        if local_path:
-            local_path = Path(local_path)
-            local_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(local_path, 'w') as f:
-                json.dump(config_data, f, indent=2)
-            logger.info(f"Save config to {local_path}")
-
-        return config_data
-
     except ClientError as e:
         logger.error(f"Failed to download config from {config_path}: {e}")
         raise
 
+    if config_bytes is None:
+        logger.error(f"Config file not found at {config_path}")
+        raise
+
+    try:
+        config_data = json.loads(config_bytes.decode('utf-8'))
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to decode config JSON from {config_path}: {e}")
+        raise
+
+    if local_path:
+        local_path = Path(local_path)
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(local_path, 'w', encoding='utf-8') as f:
+            json.dump(config_data, f, indent=2)
+        logger.info(f"Save config to {local_path}")
+
+    return config_data
+
 
 def upload_result(task_name: str, file_or_dir_path: str):
     """
-    Upload result (a file or a folder) to S3.
+    Upload result (a file or a folder) to S3 under the path *{task_name}/*.
 
     :param task_name: Task name / job ID
     :param file_or_dir_path: Local file or folder path to upload
     """
     object_key = RESULT_KEY_TEMPLATE.format(job_id=task_name, file_or_dir_name=Path(file_or_dir_path).name)
     _get_manager().upload(object_key=object_key, file_or_dir_path=Path(file_or_dir_path))
-
-
-class JobStatus(Enum):
-    RUNNING = "RUNNING"
-    SUCCESS = "SUCCESS"
-    FAILED = "FAILED"
-
-
-@dataclass
-class Progress:
-    task_name: str
-    status: JobStatus
-    message: Optional[str] = None
-    timestamp: Optional[str] = None  # ISO format timestamp
-
-    def __post_init__(self):
-        if self.timestamp is None:
-            self.timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S %Z")
-
-
-@dataclass
-class MDProgress(Progress):
-    """
-    MDProgress extends Progress to include additional fields for MD simulation progress tracking.
-
-    :param stage_name: Optional current simulation stage: "NPT", "NVT", or "NEMD"
-    :param total_steps: Sum of total stages in all stages (NPT, NVT, NEMD)
-    :param completed_steps: Sum of completed steps across all stages
-    """
-    stage_name: Optional[Literal["NPT", "NVT", "NEMD"]] = None
-    total_steps: Optional[int] = None
-    completed_steps: Optional[int] = None
 
 
 def update_progress(progress: Progress | MDProgress):
@@ -414,3 +380,6 @@ def update_progress(progress: Progress | MDProgress):
     except ClientError as e:
         logger.error(f"Failed to save progress for task {progress.task_name}: {e}")
         raise
+
+
+__all__ = ['download_config', 'upload_result', 'update_progress']
