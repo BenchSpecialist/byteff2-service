@@ -49,7 +49,7 @@ def test_upload_config_lazy_manager(monkeypatch):
     monkeypatch.setattr(boto3, "client", fake_client)
 
     s3_util = _reload_s3_util()
-    s3_util.get_manager.cache_clear()
+    s3_util._get_manager.cache_clear()
 
     assert call_count["count"] == 0
 

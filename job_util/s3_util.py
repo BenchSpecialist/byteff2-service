@@ -291,7 +291,7 @@ class S3FileManager:
 
 
 @lru_cache(maxsize=1)
-def get_manager() -> S3FileManager:
+def _get_manager() -> S3FileManager:
     """
     Lazily create and cache a singleton S3FileManager.
 
@@ -312,9 +312,9 @@ def upload_config(task_name: str, config_data: Dict[str, Any]) -> str:
     try:
         object_key = CONFIG_KEY_TEMPLATE.format(job_id=task_name)
         json_str = json.dumps(config_data, indent=2)
-        s3_path = get_manager().upload(object_key=object_key,
-                                       data=json_str.encode('utf-8'),
-                                       content_type='application/json')
+        s3_path = _get_manager().upload(object_key=object_key,
+                                        data=json_str.encode('utf-8'),
+                                        content_type='application/json')
         return s3_path
     except ClientError as e:
         logger.error(f"Failed to upload config for task {task_name}: {e}")
@@ -334,7 +334,7 @@ def download_config(task_name: str, local_path: Optional[Path] = None) -> Dict[s
 
     try:
         # Download config file as bytes
-        config_bytes = get_manager().download(object_key=config_path, return_bytes=True)
+        config_bytes = _get_manager().download(object_key=config_path, return_bytes=True)
         config_json = config_bytes.decode('utf-8')
         config_data = json.loads(config_json)
 
@@ -360,7 +360,7 @@ def upload_result(task_name: str, file_or_dir_path: str):
     :param file_or_dir_path: Local file or folder path to upload
     """
     object_key = RESULT_KEY_TEMPLATE.format(job_id=task_name, file_or_dir_name=Path(file_or_dir_path).name)
-    get_manager().upload(object_key=object_key, file_or_dir_path=Path(file_or_dir_path))
+    _get_manager().upload(object_key=object_key, file_or_dir_path=Path(file_or_dir_path))
 
 
 class JobStatus(Enum):
@@ -408,7 +408,7 @@ def update_progress(progress: Progress | MDProgress):
 
         # Write latest progress as JSON to S3 (overwrites existing file)
         json_str = json.dumps(progress_dict, indent=2)
-        get_manager().upload(object_key=object_key, data=json_str.encode('utf-8'), content_type='application/json')
+        _get_manager().upload(object_key=object_key, data=json_str.encode('utf-8'), content_type='application/json')
         logger.info(f"Saved progress for task {progress.task_name}: {progress.status.value} - {progress.message}")
 
     except ClientError as e:

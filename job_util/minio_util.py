@@ -101,7 +101,7 @@ class MinioFileManager:
 
 
 @lru_cache(maxsize=1)
-def get_manager() -> MinioFileManager:
+def _get_manager() -> MinioFileManager:
     """
     Return a lazily created, cached singleton :class:`MinioFileManager`.
 
@@ -121,7 +121,7 @@ def download_config(task_name: str, local_folder: Path | str) -> None:
     """
     remote_path = f"{task_name}/config.json"
     local_path = Path(local_folder) / "config.json"
-    get_manager().download_file(BUCKET, remote_path, local_path)
+    _get_manager().download_file(BUCKET, remote_path, local_path)
 
 
 def upload_result(task_name: str, local_folder: Path | str) -> None:
@@ -135,7 +135,7 @@ def upload_result(task_name: str, local_folder: Path | str) -> None:
     for local_file in folder.iterdir():
         if local_file.is_file():
             object_name = f"{task_name}/{local_file.name}"
-            get_manager().upload_file(bucket_name=BUCKET, object_name=object_name, local_file=local_file)
+            _get_manager().upload_file(bucket_name=BUCKET, object_name=object_name, local_file=local_file)
 
 
 __all__ = ['download_config', 'upload_result']
