@@ -11,6 +11,14 @@ RESULT_KEY_TEMPLATE = "{job_id}/{file_or_dir_name}"
 STATUS_FILE_KEY_TEMPLATE = "{job_id}/status.json"
 
 
+class JobStorageType(Enum):
+    """
+    Enum to specify the type of object storage used for job management.
+    """
+    S3 = "S3"
+    MINIO = "MINIO"
+
+
 class JobStatus(Enum):
     RUNNING = "RUNNING"
     SUCCESS = "SUCCESS"

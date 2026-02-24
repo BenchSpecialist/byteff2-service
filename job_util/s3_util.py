@@ -350,7 +350,7 @@ def download_config(task_name: str, local_path: Optional[Path] = None) -> Dict[s
     return config_data
 
 
-def upload_result(task_name: str, file_or_dir_path: str):
+def upload_result(task_name: str, file_or_dir_path: Path | str):
     """
     Upload result (a file or a folder) to S3 under the path *{task_name}/*.
 
