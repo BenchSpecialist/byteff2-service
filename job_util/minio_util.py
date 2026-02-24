@@ -8,23 +8,28 @@ Environment Variables Required:
 - MINIO_SECRET_KEY: MinIO secret access key
 - MINIO_BUCKET:     Target bucket name
 """
-import logging
-from functools import lru_cache
-from pathlib import Path
-from typing import Optional
 import os
+import json
+import logging
+from enum import Enum
+from io import BytesIO
+from pathlib import Path
+from typing import Any, Dict, Optional
+from dataclasses import asdict
+from functools import lru_cache
 
 from minio import Minio
 from minio.error import S3Error
 
-logger = logging.getLogger(__name__)
+from .common import (CONFIG_KEY_TEMPLATE, RESULT_KEY_TEMPLATE, Progress, MDProgress,
+    STATUS_FILE_KEY_TEMPLATE, DEFAULT_BUCKET_NAME) # yapf: disable
 
-_DEFAULT_BUCKET_NAME = "byteff2-jobs"
+logger = logging.getLogger(__name__)
 
 MINIO_ENDPOINT: Optional[str] = os.environ.get("MINIO_ENDPOINT")
 MINIO_ACCESS_KEY: Optional[str] = os.environ.get("MINIO_ACCESS_KEY")
 MINIO_SECRET_KEY: Optional[str] = os.environ.get("MINIO_SECRET_KEY")
-BUCKET: str = os.environ.get("MINIO_BUCKET", _DEFAULT_BUCKET_NAME)
+BUCKET: str = os.environ.get("MINIO_BUCKET", DEFAULT_BUCKET_NAME)
 
 
 class MinioFileManager:
@@ -83,6 +88,57 @@ class MinioFileManager:
         except S3Error as exc:
             raise S3Error(exc.code, exc.message, exc.resource, exc.request_id, exc.host_id, exc.response) from exc
 
+    def upload(
+        self,
+        bucket_name: str,
+        object_name: str,
+        file_or_dir_path: Path | str,
+        content_type: Optional[str] = None,
+    ) -> list[str]:
+        """
+        Upload a local file or directory to MinIO.
+
+        For a single file, uploads it directly under *object_name*.
+        For a directory, recursively uploads every file under *object_name/* preserving
+        the relative sub-path.
+
+        :param bucket_name: Target bucket name.
+        :param object_name: Remote object key (prefix for directories).
+        :param file_or_dir_path: Local file or directory to upload.
+        :param content_type: Optional MIME type (applied to single-file uploads only).
+        :return: List of uploaded remote object keys.
+        :raises FileNotFoundError: If *file_or_dir_path* does not exist.
+        :raises S3Error: If any upload fails.
+        """
+        local_path = Path(file_or_dir_path)
+        if not local_path.exists():
+            raise FileNotFoundError(f"Local path not found: {local_path}")
+
+        self.ensure_bucket(bucket_name)
+        uploaded: list[str] = []
+
+        if local_path.is_file():
+            try:
+                self.client.fput_object(bucket_name, object_name, str(local_path), content_type)
+                logger.info(f"Uploaded {local_path} → {bucket_name}/{object_name}")
+                uploaded.append(object_name)
+            except S3Error as exc:
+                raise S3Error(exc.code, exc.message, exc.resource, exc.request_id, exc.host_id, exc.response) from exc
+        else:
+            for item in local_path.rglob("*"):
+                if item.is_file():
+                    rel_key = f"{object_name.rstrip('/')}/{item.relative_to(local_path)}"
+                    try:
+                        self.client.fput_object(bucket_name, rel_key, str(item))
+                        logger.debug(f"Uploaded {item} → {bucket_name}/{rel_key}")
+                        uploaded.append(rel_key)
+                    except S3Error as exc:
+                        raise S3Error(exc.code, exc.message, exc.resource, exc.request_id, exc.host_id,
+                                      exc.response) from exc
+            logger.info(f"Uploaded directory {local_path} ({len(uploaded)} files) → {bucket_name}/{object_name}/")
+
+        return uploaded
+
     def download_file(self, bucket_name: str, object_name: str, local_path: Path | str) -> None:
         """
         Download an object from MinIO to a local path.
@@ -99,6 +155,32 @@ class MinioFileManager:
         except S3Error as exc:
             raise S3Error(exc.code, exc.message, exc.resource, exc.request_id, exc.host_id, exc.response) from exc
 
+    def download_bytes(self, bucket_name: str, object_name: str) -> bytes:
+        """
+        Download an object from MinIO and return its content as bytes.
+
+        :param bucket_name: Target bucket name.
+        :param object_name: Remote object key.
+        :return: Object content as raw bytes.
+        :raises LookupError: If the bucket does not exist.
+        :raises S3Error: If the download fails.
+        """
+        if not self.client.bucket_exists(bucket_name):
+            raise LookupError(f"Bucket not found: {bucket_name}")
+
+        response = None
+        try:
+            response = self.client.get_object(bucket_name, object_name)
+            data = response.read()
+            logger.info(f"Downloaded {bucket_name}/{object_name} into memory ({len(data)} bytes)")
+            return data
+        except S3Error as exc:
+            raise S3Error(exc.code, exc.message, exc.resource, exc.request_id, exc.host_id, exc.response) from exc
+        finally:
+            if response is not None:
+                response.close()
+                response.release_conn()
+
 
 @lru_cache(maxsize=1)
 def _get_manager() -> MinioFileManager:
@@ -112,30 +194,72 @@ def _get_manager() -> MinioFileManager:
     return MinioFileManager(secure=secure)
 
 
-def download_config(task_name: str, local_folder: Path | str) -> None:
+def download_config(task_name: str, local_path: Optional[Path] = None) -> Dict[str, Any]:
     """
-    Download the job configuration file from MinIO.
+    Download job configuration JSON from MinIO.
 
     :param task_name: Unique task/job identifier used as the remote path prefix.
-    :param local_folder: Local directory where ``config.json`` will be saved.
+    :param local_path: Optional local file path to save the config. If ``None``, only returns dict.
+    :return: Configuration data as a dictionary.
+    :raises S3Error: If the download fails.
     """
-    remote_path = f"{task_name}/config.json"
-    local_path = Path(local_folder) / "config.json"
-    _get_manager().download_file(BUCKET, remote_path, local_path)
+    config_key = CONFIG_KEY_TEMPLATE.format(job_id=task_name)
+
+    config_bytes = _get_manager().download_bytes(BUCKET, config_key)
+    config_data: Dict[str, Any] = json.loads(config_bytes.decode("utf-8"))
+
+    if local_path is not None:
+        resolved = Path(local_path)
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        with resolved.open("w") as f:
+            json.dump(config_data, f, indent=2)
+        logger.info(f"Saved config to {resolved}")
+
+    return config_data
 
 
-def upload_result(task_name: str, local_folder: Path | str) -> None:
+def upload_result(task_name: str, file_or_dir_path: Path | str) -> None:
     """
-    Upload all files in *local_folder* to MinIO under *task_name/*.
+    Upload a result file or directory to MinIO under *{task_name}/*.
 
     :param task_name: Unique task/job identifier used as the remote path prefix.
-    :param local_folder: Local directory whose contents will be uploaded.
+    :param file_or_dir_path: Local file or directory path to upload.
     """
-    folder = Path(local_folder)
-    for local_file in folder.iterdir():
-        if local_file.is_file():
-            object_name = f"{task_name}/{local_file.name}"
-            _get_manager().upload_file(bucket_name=BUCKET, object_name=object_name, local_file=local_file)
+    object_name = RESULT_KEY_TEMPLATE.format(job_id=task_name, file_or_dir_name=Path(file_or_dir_path).name)
+    _get_manager().upload(bucket_name=BUCKET, object_name=object_name, file_or_dir_path=Path(file_or_dir_path))
 
 
-__all__ = ['download_config', 'upload_result']
+def update_progress(progress: Progress | MDProgress) -> None:
+    """
+    Save the latest job progress snapshot as JSON to MinIO, overwriting any previous value.
+
+    :param progress: Progress dataclass instance containing task_name, status, and message
+    :raises S3Error: If writing the status file fails.
+    """
+    object_name = STATUS_FILE_KEY_TEMPLATE.format(job_id=progress.task_name)
+    progress_dict = {
+        key: value.value if isinstance(value, Enum) else value
+        for key, value in asdict(progress).items()
+        if value is not None
+    }
+    payload = json.dumps(progress_dict, indent=2).encode("utf-8")
+    data_stream = BytesIO(payload)
+    manager = _get_manager()
+    manager.ensure_bucket(BUCKET)
+    try:
+        manager.client.put_object(
+            BUCKET,
+            object_name,
+            data_stream,
+            length=len(payload),
+            content_type="application/json",
+        )
+        logger.info(
+            f"Saved progress for task {progress.task_name}: {progress_dict.get('status')} - {progress_dict.get('message')}"
+        )
+    except S3Error as exc:
+        logger.error(f"Failed to save progress for task {progress.task_name}: {exc}")
+        raise
+
+
+__all__ = ['download_config', 'upload_result', 'update_progress']
