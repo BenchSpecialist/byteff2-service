@@ -3,8 +3,10 @@ S3 File Manager handles all interactions with S3-compatible storage.
 It provides methods for uploading/downloading job configurations and results.
 
 Environment Variables Required:
-- S3_ACCESS_KEY: S3 access key ID
-- S3_SECRET_KEY: S3 secret access key
+- S3_ENDPOINT_URL: S3 endpoint URL
+- S3_ACCESS_KEY:   S3 access key ID
+- S3_SECRET_KEY:   S3 secret access key
+- S3_BUCKET_NAME:  Target bucket name
 """
 import os
 import json
@@ -21,8 +23,10 @@ from botocore.exceptions import ClientError
 
 logger = logging.getLogger(__name__)
 
+_DEFAULT_BUCKET_NAME = "byteff2-jobs"
+
 S3_ENDPOINT_URL = os.environ.get("S3_ENDPOINT_URL")
-BUCKET = os.environ.get("S3_BUCKET_NAME")
+BUCKET = os.environ.get("S3_BUCKET_NAME", _DEFAULT_BUCKET_NAME)
 S3_ACCESS_KEY = os.environ.get("S3_ACCESS_KEY")
 S3_SECRET_KEY = os.environ.get("S3_SECRET_KEY")
 
