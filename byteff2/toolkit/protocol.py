@@ -3,7 +3,7 @@ import os
 import shutil
 import subprocess
 from enum import Enum
-from typing import OrderedDict
+from pathlib import Path
 
 import ase.io as aio
 import numpy as np
@@ -13,6 +13,7 @@ import pandas as pd
 from byteff2.md_utils.md_run import dcd_read, npt_run, nvt_run, rescale_box, volume_calc
 from byteff2.md_utils.onsager_conductivity import onsager_calc
 from byteff2.md_utils.viscosity import nonequ_run, viscosity_calc
+from byteff2.md_utils.rdf import calc_solvation_cluster_distribution
 from byteff2.toolkit.gmxtool import GMXScript
 from byteff2.toolkit.openmmtool import generate_openmm_system
 from byteff2.train.utils import get_nb_params, load_model
@@ -21,6 +22,11 @@ from bytemol.toolkit.gmxtool.topparse import RecordAtomType, RecordMolecule, Rec
 from bytemol.utils import get_data_file_path, setup_default_logging
 
 logger = setup_default_logging()
+
+from job_util import JobStatus, Progress, get_backend
+
+_backend = get_backend()
+update_progress = _backend.update_progress
 
 
 class ComponentType(Enum):
@@ -116,12 +122,15 @@ def load_topo(topo_dir, mol_name):
 
 
 def generate_system_gro(components, working_dir, box):
+    solvent = [c for c in components.values() if c.type == ComponentType.SOLVENT]
+    cation = [c for c in components.values() if c.type == ComponentType.CATION]
+    anion = [c for c in components.values() if c.type == ComponentType.ANION]
     script = GMXScript()
     script.add('cd "$(dirname "$0")" ')
-    for i, c in enumerate(components.values()):
+    for i, c in enumerate(solvent):
         # Generate the box from the first component
         if i == 0:
-            # Generate the box for components
+            # Generate the box for solvent
             script.init_gro_box(f"{c.name}.gro", box)
             rest_molecules = c.molar_num - 1
             if rest_molecules:
@@ -129,6 +138,11 @@ def generate_system_gro(components, working_dir, box):
             continue
         script.insert_molecules(f"{c.name}.gro", c.molar_num)
 
+    # Add cation and anion
+    for c in cation:
+        script.insert_molecules(f"{c.name}.gro", c.molar_num)
+    for c in anion:
+        script.insert_molecules(f"{c.name}.gro", c.molar_num)
     # Add run md run command
     script.finish()
     script.write(f'{working_dir}/run_gmx.sh')
@@ -174,23 +188,12 @@ class Protocol:
         logger.info(f'building system for {components_ratio.keys()}')
         # read and parse topo files
         os.makedirs(working_dir, exist_ok=True)
-        components_temp = dict()
+        components = {}
         full_system_records, record_atomtype_names = [], []
         system_charge = 0
         for component_name, molar_ratio in components_ratio.items():
             component = load_topo(self.params_dir, component_name)
             component.molar_ratio = molar_ratio
-            components_temp[component_name] = component
-        components_temp = {
-            k: v for k, v in sorted(components_temp.items(), key=lambda item: item[1].molar_ratio, reverse=True)
-        }
-        solvent = [k for k, v in components_temp.items() if v.type == ComponentType.SOLVENT]
-        anion = [k for k, v in components_temp.items() if v.type == ComponentType.ANION]
-        cation = [k for k, v in components_temp.items() if v.type == ComponentType.CATION]
-        component_order = solvent + anion + cation
-        components = OrderedDict()
-        for component_name in component_order:
-            component = components_temp[component_name]
             components[component_name] = component
             for record in component.atp_records.all:
                 if isinstance(record, RecordAtomType):
@@ -216,7 +219,7 @@ class Protocol:
             lines.append(" 100.00000 100.00000 100.00000\n")
             with open(f'{working_dir}/solvent_salt_gas.gro', 'w') as new_gro_f:
                 new_gro_f.writelines(lines)
-        input_mol_ratio = np.array(list(c.molar_ratio for c in components.values()))
+        input_mol_ratio = np.array(list(components_ratio.values()))
         real_total_atoms, mix = search_mixture(input_mol_ratio, total_atoms, total_atoms + 1000, components)
 
         full_topparse.molecules = []
@@ -229,6 +232,7 @@ class Protocol:
 
         init_density = predict_density(components)
         init_box = predict_box(components, init_density)
+        components = {k: v for k, v in sorted(components.items(), key=lambda item: item[1].molar_num, reverse=True)}
         itp_list = [f'{mol_name}.itp' for mol_name in components.keys()]
         atp_list = [f'{mol_name}.atp' for mol_name in components.keys()]
         mols = [[i] for i in range(len(components))]
@@ -332,6 +336,12 @@ class DensityProtocol(Protocol):
 
 
 class TransportProtocol(Protocol):
+    # Default total steps in each MD stage for TransportProtocol
+    STAGE_TO_TOTAL_STEPS = {
+        "NPT": 4_000_000,
+        "NVT": 10_000_000,
+        "NEMD": 1_000_000,
+    }
 
     def __init__(self, config: dict):
         super().__init__(config['params_dir'], config['output_dir'])
@@ -339,10 +349,7 @@ class TransportProtocol(Protocol):
         self.components = None
 
     def run_protocol(self):
-        logger.info('running transport protocol')
-        npt_steps = 4000000
-        nvt_steps = 10000000
-        nonequ_steps = 1000000
+        logger.info('Running transport protocol')
         nonbonded_params = self.generate_ff_params(self.config['smiles'])
         self.components = self.build_system(
             self.config['natoms'],
@@ -359,17 +366,21 @@ class TransportProtocol(Protocol):
             nonbonded_params,
             unit_cell,
         )
-        logger.info('npt run')
+        update_progress(
+            Progress(task_name=self.config['task_name'],
+                     status=JobStatus.RUNNING,
+                     message='Simulation box constructed; NPT equilibration run started.'))
+        logger.info('Starting NPT run')
         npt_positions, npt_box_vec = npt_run(
             input_top,
             input_system,
             input_positions,
             temperature=self.config['temperature'],
-            npt_steps=npt_steps,
+            npt_steps=self.config.get('npt_steps', self.STAGE_TO_TOTAL_STEPS['NPT']),
             work_dir=self.output_dir,
         )
         rescale_positions, rescale_box_vec = rescale_box(npt_positions, npt_box_vec, work_dir=self.output_dir)
-        logger.info('nvt run')
+        logger.info('Starting NVT run')
         nvt_positions, nvt_box_vec = nvt_run(
             input_top,
             input_system,
@@ -377,9 +388,9 @@ class TransportProtocol(Protocol):
             rescale_box_vec,
             temperature=self.config['temperature'],
             work_dir=self.output_dir,
-            nvt_steps=nvt_steps,
+            nvt_steps=self.config.get('nvt_steps', self.STAGE_TO_TOTAL_STEPS['NVT']),
         )
-        logger.info('nonequ run')
+        logger.info('Starting NEMD for viscosity calculation')
         nonequ_run(
             input_top,
             input_system,
@@ -387,37 +398,74 @@ class TransportProtocol(Protocol):
             nvt_box_vec,
             temperature=self.config['temperature'],
             work_dir=self.output_dir,
-            nonequ_steps=nonequ_steps,
+            nonequ_steps=self.config.get('nonequ_steps', self.STAGE_TO_TOTAL_STEPS['NEMD']),
         )
 
-    def post_process(self,):
+    def post_process(self):
         logger.info('post processing transport protocol')
-        vis = viscosity_calc(self.output_dir)
+        viscosity = viscosity_calc(self.output_dir)
         md_volume, md_temperature = volume_calc(self.output_dir)
-        logger.info('viscosity: %.3f', vis)
+        logger.info('viscosity: %.3f', viscosity)
 
         nvt_positions = dcd_read(os.path.join(self.output_dir, 'nvt.dcd'))
         species_mass_dict, species_number_dict, species_charges_dict = {}, {}, {}
+        solvent, cation, anion = [], [], []
         for mol_name, topo_mol in self.components.items():
             species_mass_dict[mol_name] = [atom.mass for atom in topo_mol.atoms]
             species_number_dict[mol_name] = topo_mol.molar_num
             species_charges_dict[mol_name] = int(sum([atom.charge for atom in topo_mol.atoms]))
-        species_order = list(self.components.keys())
+            if topo_mol.type == ComponentType.SOLVENT:
+                solvent.append(mol_name)
+            elif topo_mol.type == ComponentType.CATION:
+                cation.append(mol_name)
+            elif topo_mol.type == ComponentType.ANION:
+                anion.append(mol_name)
+        sorted_components_names = anion + cation + solvent
 
-        results = onsager_calc(
-            species_order,
+        csv_file = Path(self.output_dir) / 'npt_state.csv'
+        density = pd.read_csv(csv_file)["Density (g/mL)"]
+
+        dd = []
+        for _ in range(10):
+            dd.append(np.mean(np.random.choice(density[-1000:], 100)))
+
+        density = np.mean(dd)
+
+        # keep solvent at the end
+        species_charges_dict = {k: species_charges_dict[k] for k in sorted_components_names}
+        species_mass_dict = {k: species_mass_dict[k] for k in sorted_components_names}
+        species_number_dict = {k: species_number_dict[k] for k in sorted_components_names}
+
+        onsager_result = onsager_calc(
             species_mass_dict,
             species_number_dict,
             species_charges_dict,
             md_volume,
-            vis,
+            viscosity,
             md_temperature,
             nvt_positions,
         )
-        results['viscosity'] = vis
-        results["components"] = species_order
-        with open(os.path.join(self.output_dir, 'results.json'), 'w') as f:
-            json.dump(results, f, indent=2)
+
+        diffusion_data = [{
+            "species": name,
+            "diffusion_coefficient_1e-10_m2_s": onsager_result["Dself_inf"][i]
+        } for i, name in enumerate(sorted_components_names)]
+
+        results = {
+            "system_properties": {
+                "density [g/cm3]": density,
+                "viscosity [cP]": viscosity,
+                "conductivity [mS/cm]": onsager_result["conductivity_onsager"]
+            },
+            "diffusion_data": diffusion_data,
+        }
+
+        result = calc_solvation_cluster_distribution(species_mass_dict, species_number_dict, anion, cation, md_volume,
+                                                     nvt_positions)
+        results.update(**result)
+
+        with open(Path(self.output_dir) / 'results_mu.json', 'w') as f:
+            json.dump(results, f, indent=4)
 
 
 class HVapProtocol(Protocol):
@@ -430,7 +478,7 @@ class HVapProtocol(Protocol):
     def run_protocol(self):
         logger.info('running hvap protocol')
         npt_steps = 1500000
-        nvt_steps = 5000000
+        nvt_steps = 1500000
         nonbonded_params = self.generate_ff_params(self.config['smiles'])
         self.components = self.build_system(
             self.config['natoms'],
@@ -504,7 +552,7 @@ class HVapProtocol(Protocol):
         e_gas = df["Potential Energy (kJ/mole)"]
         eg = []
         for _ in range(10):
-            eg.append(np.mean(np.random.choice(e_gas[2000:], 100)))
+            eg.append(np.mean(np.random.choice(e_gas[2000:3000], 100)))
         e_gas, e_gas_std = np.mean(eg), np.std(eg)
 
         hvap = (e_gas - e_liquid) / 4.184 + 8.314 * self.config['temperature'] / 1000 / 4.184  # kcal/mol
