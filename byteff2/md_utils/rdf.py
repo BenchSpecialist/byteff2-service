@@ -1,6 +1,6 @@
 import torch
 from functools import wraps
-from typing import Dict, List, Any, Callable
+from typing import Dict, List, Any, Callable, Tuple
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -53,6 +53,76 @@ def get_cluster_category(cluster_size: int) -> str:
         return "AGG"
 
 
+def calc_com_rdf_cn(
+        anion_com_tensor: torch.Tensor,  # (frames, N-, 3)
+        cation_com_tensor: torch.Tensor,  # (frames, N+, 3)
+        box_length: float,
+        r_max: float = 12.0,  # angstrom
+        nbins: int = 300,  # number of bins
+) -> Tuple[List[List[float]], float]:
+    """
+    Calculate radial distribution function (RDF) and coordination number (CN) curves based on the center-of-mass (COM) distances between anions and cations.
+    RDF is defined as the number of anions per unit volume at a given distance from a cation.
+
+    :param anion_com_tensor: Atomic coordinates of the anions with shape (frames, N-, 3)
+    :param cation_com_tensor: Atomic coordinates of the cations with shape (frames, N+, 3)
+    :param box_length: Simulation box length with shape (3,)
+    :param r_max: maximum distance to consider, in angstrom
+    :param nbins: number of bins
+
+    :return: rdf_array: (nbins, 3), saving centers r(Å), g(r) and CN(r) values;
+             r_cut: float, the first minimum of g(r) to be used as cutoff in solvation
+             cluster identification, in angstrom
+    """
+    device = anion_com_tensor.device
+
+    n_frames = anion_com_tensor.shape[0]
+    n_anions = anion_com_tensor.shape[1]
+    n_cations = cation_com_tensor.shape[1]
+
+    box = torch.tensor([box_length] * 3, device=device)
+
+    dr = r_max / nbins
+    edges = torch.linspace(0, r_max, nbins + 1, device=device)
+    centers = 0.5 * (edges[:-1] + edges[1:])
+
+    hist = torch.zeros(nbins, device=device)
+
+    for frame in range(n_frames):
+        shift = anion_com_tensor[frame].unsqueeze(1) - cation_com_tensor[frame].unsqueeze(0)
+        shift = shift - box * torch.round(shift / box)
+        dist = torch.sqrt(torch.sum(shift**2, dim=-1))
+        hist += torch.histc(dist.flatten(), bins=nbins, min=0, max=r_max)
+
+    hist /= n_frames
+
+    # Get number density of anions
+    volume = box_length**3
+    rho = n_anions / volume
+
+    shell_volume = 4 / 3 * torch.pi * (edges[1:]**3 - edges[:-1]**3)
+    ideal = rho * shell_volume * n_cations
+
+    g = hist / ideal
+
+    # Integrate g(r) to get coordination number: CN(r) = 4πρ ∫_0^r g(r') r'^2 dr'
+    integrand = g * centers**2
+    cn = 4 * torch.pi * rho * torch.cumsum(integrand * dr, dim=0)
+
+    # Get cutoff for first solvation shell
+    g_cpu = g.detach().cpu().numpy()
+    r_cpu = centers.detach().cpu().numpy()
+    # First peak -> preferred contact
+    peak_index = g_cpu.argmax()
+    # Find first minimum after the first peak -> separation to second shell
+    # also corresponds to maximum in potential of mean force (PMF), free energy transition boundary.
+    min_index = peak_index + g_cpu[peak_index:].argmin()
+    r_cut = float(r_cpu[min_index])
+
+    rdf_array = torch.stack([centers, g, cn], dim=1)
+    return rdf_array.detach().cpu().tolist(), r_cut
+
+
 @track_gpu_memory
 def calc_solvation_cluster_distribution(species_mass_dict: Dict[str, float],
                                         species_number_dict: Dict[str, int],
@@ -60,7 +130,8 @@ def calc_solvation_cluster_distribution(species_mass_dict: Dict[str, float],
                                         cation: List[str],
                                         md_volume: float,
                                         nvt_positions: torch.Tensor,
-                                        batch_size: int = 1000) -> Dict[str, Any]:
+                                        batch_size: int = 1000,
+                                        use_default_cutoff: bool = True) -> Dict[str, Any]:
     """
     Compute solvation cluster distribution based on the number of anion COMs within a cutoff
     distance from each cation COM.
@@ -189,8 +260,13 @@ def calc_solvation_cluster_distribution(species_mass_dict: Dict[str, float],
     del com_tensor, weighted_positions, mol_index, nvt_positions_torch
     torch.cuda.empty_cache()
 
-    rdf_array, r_cut = None, _DEFAULT_CUTOFF
-    print(f"Cutoff for first solvation shell: {r_cut} Å")
+    if use_default_cutoff:
+        rdf_array, r_cut = None, _DEFAULT_CUTOFF
+        print(f"Using default distance cutoff for coordination counting: {r_cut} Å.")
+    else:
+        print("Computing RDF and cutoff from first minimum of RDF...")
+        rdf_array, r_cut = calc_com_rdf_cn(anion_com_tensor, cation_com_tensor, box_size)
+        print(f"Cutoff for first solvation shell from RDF: {r_cut} Å.")
 
     # Process frames in batches: (batch_size, n_anions, n_cations, 3)
     # instead of (n_frames, n_anions, n_cations, 3) to avoid OOM
@@ -211,7 +287,7 @@ def calc_solvation_cluster_distribution(species_mass_dict: Dict[str, float],
         # Compute the distance squared: (batch_frames, n_anions, n_cations)
         com_tensor_distance = torch.sum(shift**2, dim=-1)
 
-        # Get discrete coordination number, use dynamic cutoff for coordination counting
+        # Get discrete coordination number within cutoff distance
         # Θ(r_ij(t) < r_cut^2) = 1 if r_ij(t) < r_cut, 0 otherwise
         # for one batch: (batch_frames, n_cations)
         coordination_counts_batch = torch.sum(com_tensor_distance < r_cut**2, dim=1)
