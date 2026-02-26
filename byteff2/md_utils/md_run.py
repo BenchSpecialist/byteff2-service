@@ -16,6 +16,7 @@ import copy
 import logging
 import os
 from typing import Optional
+from time import perf_counter
 
 import numpy as np
 import openmm as omm
@@ -26,6 +27,7 @@ from MDAnalysis.lib.formats.libdcd import DCDFile
 from openmm.app.gromacstopfile import GromacsTopFile
 
 from bytemol.utils import temporary_cd
+from byteff2.utils.utilities import get_human_readable_duration_str
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +45,7 @@ def openmm_run(
     steps: int = None,
     temperature: float = 300.,
 ):
-
+    t_start = perf_counter()
     with temporary_cd(work_dir):
         for i in range(system.getNumForces()):
             force = system.getForce(i)
@@ -58,15 +60,27 @@ def openmm_run(
         temperature = temperature * ou.kelvin  # Temperature for initial velocity
         sim = app.Simulation(top.topology, system, integrator, platform)
         sim.context.setPositions(positions)
+
+        state = sim.context.getState(getEnergy=True)
+        logger.info(f"Initial Potential Energy: {state.getPotentialEnergy()}")
+
         if box_vec is not None:
             sim.context.setPeriodicBoxVectors(*box_vec)
+
+        print(f"DEBUG: Actual Platform used: {sim.context.getPlatform().getName()}")
+        if sim.context.getPlatform().getName() == 'CUDA':
+            print(f"DEBUG: Device Index: {sim.context.getPlatform().getPropertyValue(sim.context, 'DeviceIndex')}")
+
         if minimize:
             # Minimize the energy
             logger.info('Minimizing energy')
             sim.minimizeEnergy(
-                maxIterations=1000,
+                maxIterations=200,
                 tolerance=10 * ou.kilojoules_per_mole / ou.nanometer,
             )
+            state = sim.context.getState(getEnergy=True)
+            logger.info(f"Potential Energy: {state.getPotentialEnergy()}")
+
         # initialize temperature
         sim.context.setVelocitiesToTemperature(temperature)
         if reporter is not None:
@@ -78,7 +92,7 @@ def openmm_run(
         # Run dynamics
         logger.info(f'Running {task_name}')
         sim.step(steps - sim.currentStep)
-        logger.info(f'{task_name} done')
+        logger.info(f'{task_name} done in {get_human_readable_duration_str(perf_counter() - t_start)}')
         # Get the state informations
         state = sim.context.getState(getPositions=True, enforcePeriodicBox=True)  # pylint: disable=unexpected-keyword-arg
         positions = state.getPositions()  # nm
@@ -130,7 +144,7 @@ def npt_run(
         enforcePeriodicBox=False,
     )
     return openmm_run(
-        task_name='npt',
+        task_name='NPT',
         top=top,
         system=system,
         positions=positions,
@@ -202,7 +216,7 @@ def nvt_run(
         enforcePeriodicBox=False,
     )
     return openmm_run(
-        task_name='nvt',
+        task_name='NVT',
         top=top,
         system=system,
         positions=positions,
