@@ -1,0 +1,11 @@
+{
+  "solvent_smiles_list": ["Cc1ccccc1", "CC1CCC(S1(=O)=O)C"],
+  "solvent_fractions": {"weight_fraction_list": [0.4, 0.6]},
+  "anion_name_list": ["FSI"],
+  "anion_fractions": {"mole_fraction_list": [1.0]},
+  "cation_name": "Li",
+  "num_cations": 40,
+  "cation_molality": 1.0,
+  "simulation_box_size": 500.0,
+  "temperature": 298.15
+}
