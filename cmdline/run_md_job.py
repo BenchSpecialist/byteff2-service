@@ -14,6 +14,7 @@ from byteff2.toolkit.formulation import build_simulation_box_config
 from byteff2.utils.utilities import get_human_readable_duration_str
 
 from job_util import JobStatus, Progress, MDProgress, get_backend
+from job_util.validate import validate_smiles
 
 # Read JOB_STORAGE_TYPE from env; raises ValueError early on bad value
 _backend = get_backend()
@@ -67,6 +68,16 @@ def main():
     config_mu = download_config(task_name=task_name)
     if "protocol" not in config_mu:
         config = build_simulation_box_config(config_mu)
+
+    # Input validation
+    inp_smiles = config['smiles'].values()
+    errors = validate_smiles(inp_smiles)
+    if errors:
+        err_msg = "\n".join(errors)
+        print(err_msg, file=sys.stderr)
+        update_progress(Progress(task_name=task_name, status=JobStatus.FAILED, message=err_msg))
+        cleanup_on_exit()
+        sys.exit(1)
 
     config["task_name"] = task_name
 
