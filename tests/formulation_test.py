@@ -1,4 +1,4 @@
-from byteff2.toolkit.formulation import build_simulation_box_config
+from tools.formulation import build_simulation_box_config
 
 
 def test_build_simulation_box_config():

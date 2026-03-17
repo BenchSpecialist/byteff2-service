@@ -10,9 +10,9 @@ from pathlib import Path
 from time import perf_counter
 
 from byteff2.toolkit.protocol import TransportProtocol
-from byteff2.toolkit.formulation import build_simulation_box_config
 from byteff2.utils.utilities import get_human_readable_duration_str
 
+from tools.formulation import build_simulation_box_config
 from job_util import JobStatus, Progress, MDProgress, get_backend
 from job_util.validate import validate_smiles
 

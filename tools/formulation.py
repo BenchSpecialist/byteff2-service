@@ -47,13 +47,16 @@ class MolInfo(TypedDict, total=False):
 
 
 # Map common names to canonical smiles (RDKit format)
-COMMON_NAME_TO_SMILES = {
+COMMON_NAME_TO_SMILES: dict[str, str] = {
+    # Cations
     "Li": "[Li+]",
+    # Anions
     "PF6": "F[P-](F)(F)(F)(F)F",  # Hexafluorophosphate
     "BF4": "F[B-](F)(F)F",  # Tetrafluoroborate
     "TFSI": 'O=S(=O)([N-]S(=O)(=O)C(F)(F)F)C(F)(F)F',  # Bis(trifluoromethylsulfonyl)imide
     "FSI": 'O=S(=O)(F)[N-]S(=O)(=O)F',  # Bis(fluorosulfonyl)imide
-    # Common Solvents
+    "DFP": 'O=P(F)(F)[O-]',  # Difluorophosphate
+    # Solvents
     'DMC': 'COC(=O)OC',
     'EC': 'O=C1OCCO1',
     'EMC': 'CCOC(=O)OC',
@@ -66,6 +69,9 @@ COMMON_NAME_TO_SMILES = {
     "DOL": "CC1OCCO1",  # 1,3-Dioxolane
     "GBL": "O=C1CCCO1",  # γ-Butyrolactone
     "MeCN": "CC#N",  # Acetonitrile
+    # Additives (often also solvents)
+    "FEC": "O=C1OC(F)CO1",  # Fluoroethylene carbonate
+    "VC": "O=C1OC=CO1",  # Vinylene carbonate
 }
 
 # Map canonical smiles to common names
