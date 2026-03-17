@@ -28,3 +28,13 @@ class SchedulerConfig:
             os.environ.get("SCHEDULER_POLL_INTERVAL", "5")
         )
     )
+    pid_file: str = field(
+        default_factory=lambda: os.environ.get(
+            "SCHEDULER_PID_FILE", os.path.expanduser("~/.jobcli/scheduler.pid")
+        )
+    )
+    log_file: str = field(
+        default_factory=lambda: os.environ.get(
+            "SCHEDULER_LOG_FILE", os.path.expanduser("~/.jobcli/scheduler.log")
+        )
+    )
