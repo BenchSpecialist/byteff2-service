@@ -14,7 +14,7 @@ from byteff2.utils.utilities import get_human_readable_duration_str
 
 from tools.formulation import build_simulation_box_config
 from job_util import JobStatus, Progress, MDProgress, get_backend
-from job_util.validate import validate_smiles
+from tools.validate import validate_smiles
 
 # Read JOB_STORAGE_TYPE from env; raises ValueError early on bad value
 _backend = get_backend()

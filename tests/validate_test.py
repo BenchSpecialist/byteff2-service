@@ -1,4 +1,4 @@
-from job_util.validate import validate_smiles
+from tools.validate import validate_smiles
 
 
 def test_validate_smiles():
