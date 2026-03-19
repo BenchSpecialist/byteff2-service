@@ -1,5 +1,6 @@
-import re
 from functools import lru_cache
+
+from rdkit import Chem
 
 SUPPORTED_ELEMENT_LABELS = {
     1: 'H',
@@ -16,26 +17,24 @@ SUPPORTED_ELEMENT_LABELS = {
 }
 
 _SUPPORTED_SET = frozenset(SUPPORTED_ELEMENT_LABELS.values())
-_AROMATIC_TO_ELEMENT = {'c': 'C', 'n': 'N', 'o': 'O', 's': 'S', 'p': 'P'}
-# Two-letter first so "Cl" is not parsed as "C" + "l"; then any other [A-Z][a-z]; then single [A-Z]; then standalone aromatic.
-_ELEMENT_PATTERN = re.compile(r'(Cl|Br|Li|[A-Z][a-z]|[A-Z]|(?<![A-Z])[cnops])')
 
 
 @lru_cache(maxsize=1024)
 def _validate_one_smiles(smi: str) -> list[str]:
-    """Collect validation errors for a single SMILES string. Returns tuple for cache safety."""
-    errors = []
+    """Collect validation errors for a single SMILES string."""
     unsupported_elements = set()
-    for m in _ELEMENT_PATTERN.finditer(smi):
-        token = m.group(1)
-        element = _AROMATIC_TO_ELEMENT.get(token, token)
-        if element not in _SUPPORTED_SET:
-            unsupported_elements.add(element)
+
+    mol = Chem.MolFromSmiles(smi)
+    if mol is None:
+        return [f"RDKit couldn't parse SMILES: {smi}"]
+
+    # union update the unsupported elements set
+    unsupported_elements |= {symbol for atom in mol.GetAtoms() if (symbol := atom.GetSymbol()) not in _SUPPORTED_SET}
 
     if unsupported_elements:
-        errors = [f"Unsupported element: {element} in '{smi}'" for element in sorted(unsupported_elements)]
+        return [f"Unsupported element: {element} in '{smi}'" for element in sorted(unsupported_elements)]
 
-    return errors
+    return []
 
 
 def validate_smiles(smi_or_smi_list: str | list[str]) -> list[str]:

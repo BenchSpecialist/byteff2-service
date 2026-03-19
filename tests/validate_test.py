@@ -3,7 +3,7 @@ from tools.validate import validate_smiles
 
 def test_validate_smiles():
     # Test valid SMILES
-    assert validate_smiles("C1=CC=CC=C1") == []
+    assert validate_smiles(["C1=CC=CC=C1", "Cc1ccccc1"]) == []
 
     # Test invalid SMILES
     assert validate_smiles("B(O[Si](C)(C)C)(O[Si](C)(C)C)O[Si](C)(C)C") == [
