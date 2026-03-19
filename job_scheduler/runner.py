@@ -31,6 +31,12 @@ PROGRESS_UPDATE_INTERVAL = int(os.environ.get("PROGRESS_UPDATE_INTERVAL", 60 * 1
                               )
 DEBUG_TOTAL_STEPS = os.environ.get("DEBUG_TOTAL_STEPS")
 
+STAGE_TO_TOTAL_STEPS = {
+    "NPT": os.environ.get("NPT_STEPS") or 2_000_000,
+    "NVT": os.environ.get("NVT_STEPS") or 5_000_000,
+    "NEMD": os.environ.get("NEMD_STEPS") or 1_000_000,
+}
+
 
 def update_job_progress(
     formulation_uid: str,
@@ -202,9 +208,9 @@ def main():
         config["nonequ_steps"] = steps
         logger.warning(f"DEBUG: Set total steps in NPT, NVT and NEMD to {steps}")
     else:
-        config["npt_steps"] = TransportProtocol.STAGE_TO_TOTAL_STEPS["NPT"]
-        config["nvt_steps"] = TransportProtocol.STAGE_TO_TOTAL_STEPS["NVT"]
-        config["nonequ_steps"] = TransportProtocol.STAGE_TO_TOTAL_STEPS["NEMD"]
+        config["npt_steps"] = STAGE_TO_TOTAL_STEPS["NPT"]
+        config["nvt_steps"] = STAGE_TO_TOTAL_STEPS["NVT"]
+        config["nonequ_steps"] = STAGE_TO_TOTAL_STEPS["NEMD"]
 
     # Run the MD protocol with background progress tracking
     stop_event = threading.Event()
