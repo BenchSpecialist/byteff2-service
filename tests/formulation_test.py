@@ -1,4 +1,5 @@
-from tools.formulation import build_simulation_box_config
+from tools.formulation import (build_simulation_box_config, build_config_from_weight_fractions,
+                               get_weight_fractions_from_molecule_counts)
 
 
 def test_build_simulation_box_config():
@@ -22,3 +23,52 @@ def test_build_simulation_box_config():
     assert config["natoms"] == 9998
     assert config["components"] == {"DMC": 499, "EC": 341, "Li": 75, "PF6": 75}
     assert config["smiles"] == {"DMC": "COC(=O)OC", "EC": "C1COC(=O)O1", "PF6": "F[P-](F)(F)(F)(F)F", "Li": "[Li+]"}
+
+
+def _format_data(data: list[tuple[str, str, float]]) -> tuple[dict[str, float], dict[str, str]]:
+    name_to_fractions = {name: fraction / 100 for _, name, fraction in data}
+    component_roles = {name: role for role, name, _ in data}
+    return name_to_fractions, component_roles
+
+
+def test_build_config_from_weight_fractions():
+    data1 = [
+        ("Solvent", "EC", 10),
+        ("Solvent", "EMC", 75),
+        ("Salt", "LiPF6", 12),
+        ("Additive", "FEC", 2),
+        ("Additive", "LiDFP", 1),
+    ]
+
+    config = build_config_from_weight_fractions(*_format_data(data1))
+    assert config["natoms"] == 10008
+    assert config["components"] == {"EMC": 562, "EC": 89, "FEC": 15, "Li": 69, "PF6": 62, "DFP": 7}
+    assert config["smiles"] == {
+        "EC": "O=C1OCCO1",
+        "EMC": "CCOC(=O)OC",
+        "FEC": "O=C1OCC(F)O1",
+        "PF6": "F[P-](F)(F)(F)(F)F",
+        "DFP": "O=P([O-])(F)F",
+        "Li": "[Li+]"
+    }
+
+    test_data2 = [
+        ("Solvent", "EC", 10),
+        ("Solvent", "EMC", 75),
+        ("Salt", "LiPF6", 12),
+        ("Additive", "VC", 0.5),
+        ("Additive", "FEC", 2),
+        ("Additive", "LiDFP", 0.5),
+    ]
+    config = build_config_from_weight_fractions(*_format_data(test_data2))
+    assert config["natoms"] == 10005
+    assert config["components"] == {'EMC': 561, 'EC': 88, 'FEC': 15, 'VC': 5, 'Li': 66, 'PF6': 62, 'DFP': 4}
+    assert config["smiles"] == {
+        'EC': 'O=C1OCCO1',
+        'EMC': 'CCOC(=O)OC',
+        'VC': 'O=c1occo1',
+        'FEC': 'O=C1OCC(F)O1',
+        'PF6': 'F[P-](F)(F)(F)(F)F',
+        'DFP': 'O=P([O-])(F)F',
+        'Li': '[Li+]'
+    }

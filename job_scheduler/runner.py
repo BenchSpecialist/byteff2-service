@@ -18,19 +18,17 @@ import polars
 
 from byteff2.toolkit.protocol import TransportProtocol
 
-from job_scheduler.formulation_io import COMMON_NAME_TO_SMILES
+from tools.formulation import COMMON_NAME_TO_SMILES, SALT_TO_IONS, build_config_from_weight_fractions
 from tools.validate import validate_smiles
 
 from job_scheduler.db.session import SessionLocal, init_db
 from job_scheduler.db.models import Job, JobStatusEnum, Component
-from job_scheduler.formulation_io import SALT_TO_IONS, build_config_from_weight_fractions
 
 logger = logging.getLogger(__name__)
 
 WORKSPACE_DIR = os.environ.get("WORKSPACE_DIR", "/app/workspace")
-PROGRESS_UPDATE_INTERVAL = int(
-    os.environ.get("PROGRESS_UPDATE_INTERVAL", 60 * 10)  # 10 minutes
-)
+PROGRESS_UPDATE_INTERVAL = int(os.environ.get("PROGRESS_UPDATE_INTERVAL", 60 * 10)  # 10 minutes
+                              )
 DEBUG_TOTAL_STEPS = os.environ.get("DEBUG_TOTAL_STEPS")
 
 
@@ -45,11 +43,7 @@ def update_job_progress(
     Write job progress to the database.
     """
     with SessionLocal() as session:
-        job = (
-            session.query(Job)
-            .filter(Job.formulation_uid == formulation_uid)
-            .first()
-        )
+        job = (session.query(Job).filter(Job.formulation_uid == formulation_uid).first())
         if job:
             job.status = status
             if progress_pct is not None:
@@ -66,13 +60,7 @@ def update_job_progress(
 ######################
 def get_completed_steps(csv_file: str) -> int:
     """Read the last step number from a simulation CSV file."""
-    value = (
-        polars.scan_csv(csv_file)
-        .select(polars.first())
-        .tail(1)
-        .collect(engine="streaming")
-        .item()
-    )
+    value = (polars.scan_csv(csv_file).select(polars.first()).tail(1).collect(engine="streaming").item())
     if isinstance(value, str):
         return int(value.strip().strip("'").split()[0])
     return int(value)
@@ -109,9 +97,7 @@ def background_progress_updater(
         ),
     ]
 
-    total_steps = (
-        config["npt_steps"] + config["nvt_steps"] + config["nonequ_steps"]
-    )
+    total_steps = (config["npt_steps"] + config["nvt_steps"] + config["nonequ_steps"])
     formulation_uid = config["formulation_uid"]
 
     while not stop_event.is_set():
@@ -127,9 +113,7 @@ def background_progress_updater(
                         status=JobStatusEnum.RUNNING,
                         progress_pct=round(pct, 2),
                         stage_name=stage,
-                        message=(
-                            f"{stage}: {completed}/{config[config_key]} steps"
-                        ),
+                        message=(f"{stage}: {completed}/{config[config_key]} steps"),
                     )
                     break
         except Exception as e:
@@ -155,15 +139,9 @@ def main():
 
     # Load formulation from database
     with SessionLocal() as session:
-        components = (
-            session.query(Component)
-            .filter(Component.formulation_uid == formulation_uid)
-            .all()
-        )
+        components = (session.query(Component).filter(Component.formulation_uid == formulation_uid).all())
         if not components:
-            logger.error(
-                f"No components found for formulation {formulation_uid}"
-            )
+            logger.error(f"No components found for formulation {formulation_uid}")
             sys.exit(1)
 
         name_to_fractions = {c.name: c.weight_fraction for c in components}
@@ -199,9 +177,7 @@ def main():
 
     # Build simulation config
     try:
-        config = build_config_from_weight_fractions(
-            name_to_fractions, component_roles
-        )
+        config = build_config_from_weight_fractions(name_to_fractions, component_roles)
     except Exception as e:
         update_job_progress(
             formulation_uid,
@@ -224,9 +200,7 @@ def main():
         config["npt_steps"] = steps
         config["nvt_steps"] = steps
         config["nonequ_steps"] = steps
-        logger.warning(
-            f"DEBUG: Set total steps in NPT, NVT and NEMD to {steps}"
-        )
+        logger.warning(f"DEBUG: Set total steps in NPT, NVT and NEMD to {steps}")
     else:
         config["npt_steps"] = TransportProtocol.STAGE_TO_TOTAL_STEPS["NPT"]
         config["nvt_steps"] = TransportProtocol.STAGE_TO_TOTAL_STEPS["NVT"]

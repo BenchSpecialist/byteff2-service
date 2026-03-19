@@ -1,16 +1,11 @@
 """
 Formulation utilities for converting electrolyte formulation specifications
 into MD simulation box configurations.
-
-The main entry point is :func:`build_simulation_box_config`, which accepts a
-formulation dict describing solvents, cation, anions, and molality, and
-returns a dict containing the integer molecule counts and SMILES strings needed
-by the byteff2 simulation protocols.
 """
 
 import warnings
 from enum import Enum
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from rdkit import Chem
 from rdkit.Chem import Descriptors
@@ -82,6 +77,15 @@ COMMON_NAME_TO_SMILES: dict[str, str] = {
 # Map canonical smiles to common names
 COMMON_SMILES_TO_NAME = {v: k for k, v in COMMON_NAME_TO_SMILES.items()}
 
+# Salt decomposition: compound salt names → (cation, anion) ion names
+SALT_TO_IONS: dict[str, tuple[str, str]] = {
+    "LiPF6": ("Li", "PF6"),
+    "LiBF4": ("Li", "BF4"),
+    "LiTFSI": ("Li", "TFSI"),
+    "LiFSI": ("Li", "FSI"),
+    "LiDFP": ("Li", "DFP"),
+}
+
 
 def _compute_molecule_info(smiles_or_name: str) -> MolInfo:
     """Parse a SMILES string or common name into a :class:`MolInfo` dict.
@@ -139,10 +143,10 @@ def _compute_molecule_info(smiles_or_name: str) -> MolInfo:
 def build_simulation_box_config(formulation_config: Dict[str, Any]) -> Dict[str, Any]:
     """Convert a formulation specification into a simulation box configuration.
 
-    Accepts a classical electrolyte formulation (molality + molar/weight
-    fractions) and returns a dict with integer molecule counts for each
-    component, scaled so the total atom count is approximately
-    :data:`TARGET_TOTAL_ATOMS`.  Charge neutrality is enforced by adjusting
+    Accepts a classical electrolyte formulation (cation molality + molar/weight
+    fractions of solvents and anions) and returns a dict with integer molecule
+    counts for each component, scaled so the total atom count is approximately
+    :data:`TARGET_TOTAL_ATOMS`. Charge neutrality is enforced by adjusting
     anion counts before deriving the cation count.
 
     Components are ordered in the output as **solvents → cation → anions**,
@@ -261,9 +265,34 @@ def build_simulation_box_config(formulation_config: Dict[str, Any]) -> Dict[str,
     for anion in anions:
         anion["relative_moles"] = total_cation_relative_moles * anion["anion_frac"]
 
-    # ------------------------------------------------------------------ #
-    # Scale to TARGET_TOTAL_ATOMS                                          #
-    # ------------------------------------------------------------------ #
+    return _build_box_from_relative_moles(solvents, solvent_names, cation_info, cation_name, anions, anion_name_list,
+                                          temperature)
+
+
+def _build_box_from_relative_moles(
+    solvents: List[MolInfo],
+    solvent_names: List[str],
+    cation_info: MolInfo,
+    cation_name: str,
+    anions: List[MolInfo],
+    anion_name_list: List[str],
+    temperature: int,
+) -> Dict[str, Any]:
+    """Scale relative moles to ~TARGET_TOTAL_ATOMS and apply charge neutrality.
+
+    All components must have ``relative_moles`` set. Returns the same structure
+    as :func:`build_simulation_box_config` (temperature, natoms, components, smiles).
+
+    :param solvents: Solvent MolInfo list with relative_moles.
+    :param solvent_names: Order of solvent names for output.
+    :param cation_info: Cation MolInfo with relative_moles.
+    :param cation_name: Cation name key.
+    :param anions: Anion MolInfo list with relative_moles.
+    :param anion_name_list: Order of anion names for output.
+    :param temperature: Simulation temperature in K.
+    :return: Config dict with components (int counts), smiles, natoms, temperature.
+    """
+    cation_charge: int = cation_info["charge"]
     all_components = solvents + [cation_info] + anions
     total_relative_atoms = sum(c["relative_moles"] * c["num_atoms"] for c in all_components)
     scale_factor = TARGET_TOTAL_ATOMS / total_relative_atoms
@@ -280,21 +309,14 @@ def build_simulation_box_config(formulation_config: Dict[str, Any]) -> Dict[str,
         output["components"][solvent["name"]] = count
         output["smiles"][solvent["name"]] = solvent["smiles"]
 
-    # ------------------------------------------------------------------ #
-    # Anion counts + charge-neutrality adjustment                          #
-    # ------------------------------------------------------------------ #
     anion_counts: Dict[str, int] = {}
     total_anion_charge = 0
-
     for anion in anions:
         count = max(round(anion["relative_moles"] * scale_factor), 1 if anion["relative_moles"] > 0 else 0)
         anion_counts[anion["name"]] = count
         output["smiles"][anion["name"]] = anion["smiles"]
         total_anion_charge += count * anion["charge"]
 
-    # Bump the first anion one molecule at a time until total anion charge
-    # is exactly divisible by the cation charge so we can neutralise cleanly.
-    # Guard: skip if the first anion has zero charge (would loop forever).
     first_anion = anions[0]
     if first_anion["charge"] != 0:
         while abs(total_anion_charge) % abs(cation_charge) != 0:
@@ -304,20 +326,14 @@ def build_simulation_box_config(formulation_config: Dict[str, Any]) -> Dict[str,
     for anion in anions:
         output["components"][anion["name"]] = anion_counts[anion["name"]]
 
-    # Q_cation + Q_anion = 0  =>  N_cat * q_cat = -Q_anion
     cation_count = -total_anion_charge // cation_charge
     output["components"][cation_info["name"]] = cation_count
     output["smiles"][cation_info["name"]] = cation_info["smiles"]
 
-    # ------------------------------------------------------------------ #
-    # Final atom count + charge check                                      #
-    # ------------------------------------------------------------------ #
     component_by_name: Dict[str, MolInfo] = {c["name"]: c for c in all_components}
-
     output["natoms"] = sum(count * component_by_name[name]["num_atoms"]
                            for name, count in output["components"].items()
                            if name in component_by_name)
-
     net_charge = sum(count * component_by_name[name]["charge"]
                      for name, count in output["components"].items()
                      if name in component_by_name)
@@ -328,13 +344,8 @@ def build_simulation_box_config(formulation_config: Dict[str, Any]) -> Dict[str,
             stacklevel=2,
         )
 
-    # ------------------------------------------------------------------ #
-    # Sort: solvents → cation → anions; within each group by descending   #
-    # count then alphabetically by name.                                   #
-    # ------------------------------------------------------------------ #
     counts = output["components"]
     sort_key = lambda name: (-counts[name], name)
-
     output["components"] = ({
         name: counts[name] for name in sorted(solvent_names, key=sort_key) if name in counts
     } | {
@@ -342,8 +353,114 @@ def build_simulation_box_config(formulation_config: Dict[str, Any]) -> Dict[str,
     } | {
         name: counts[name] for name in sorted(anion_name_list, key=sort_key) if name in counts
     })
-
     return output
 
 
-__all__ = ["build_simulation_box_config"]
+def build_config_from_weight_fractions(
+    name_to_weight_fractions: Dict[str, float],
+    component_roles: Dict[str, str],
+    temperature: int = 298,
+) -> Dict[str, Any]:
+    """Build simulation box config directly from weight fractions (sum=1 or sum=100).
+
+    Uses the same scaling and charge-neutrality logic as
+    :func:`build_simulation_box_config`, but derives relative moles from weight
+    fractions only: for each component, relative_moles = weight_fraction / molar_weight.
+    Salts are expanded into cation + anion via :data:`SALT_TO_IONS`; cation and
+    anion relative_moles come from the salt moles (salt_w / M_salt).
+
+    :param name_to_weight_fractions: Component name -> weight fraction (will be
+        normalised if sum != 1).
+    :param component_roles: Component name -> ``"Solvent"``, ``"Additive"``,
+        ``"Salt"``, ``"Cation"``, or ``"Anion"``. ``"Cation"``/``"Anion"`` use
+        weight fraction directly (relative_moles = w/M); ``"Salt"`` uses
+        :data:`SALT_TO_IONS` to expand into cation + anion(s).
+    :param temperature: Simulation temperature in K.
+    :return: Dict with ``temperature``, ``natoms``, ``components`` (int counts),
+        ``smiles``; same as :func:`build_simulation_box_config`.
+    """
+    total_frac = sum(name_to_weight_fractions.values())
+    if abs(total_frac - 1.0) > 1e-3:
+        if abs(total_frac - 100.0) < 1e-3:
+            name_to_weight_fractions = {k: v / 100.0 for k, v in name_to_weight_fractions.items()}
+        else:
+            name_to_weight_fractions = {k: v / total_frac for k, v in name_to_weight_fractions.items()}
+
+    solvent_names: List[str] = []
+    solvents: List[MolInfo] = []
+    cation_name: Optional[str] = None
+    cation_info: Optional[MolInfo] = None
+    anion_moles: Dict[str, float] = {}
+    anion_name_list: List[str] = []
+
+    for name, wf in name_to_weight_fractions.items():
+        role = component_roles.get(name, "Solvent")
+        is_salt = role == "Salt" or (role in ("Solvent", "Additive") and "Li" in name)
+        if role == "Cation":
+            info = _compute_molecule_info(COMMON_NAME_TO_SMILES.get(name, name))
+            if info["charge"] <= 0:
+                raise ValueError(f"Cation {name!r} has non-positive charge.")
+            if cation_info is None:
+                cation_name = name
+                cation_info = info
+                cation_info["name"] = name
+                cation_info["relative_moles"] = wf / info["molar_weight"]
+            else:
+                cation_info["relative_moles"] = cation_info.get("relative_moles", 0.0) + wf / info["molar_weight"]
+            continue
+        if role == "Anion":
+            info = _compute_molecule_info(COMMON_NAME_TO_SMILES.get(name, name))
+            anion_moles[name] = anion_moles.get(name, 0.0) + wf / info["molar_weight"]
+            if name not in anion_name_list:
+                anion_name_list.append(name)
+            continue
+        if not is_salt:
+            info = _compute_molecule_info(COMMON_NAME_TO_SMILES.get(name, name))
+            info["name"] = info.get("name") or f"S{len(solvent_names):02d}"
+            info["relative_moles"] = wf / info["molar_weight"]
+            solvent_names.append(info["name"])
+            solvents.append(info)
+        else:
+            if name not in SALT_TO_IONS:
+                raise ValueError(f"Unknown salt name: {name!r}. Add to :data:`SALT_TO_IONS`.")
+            cat, ani = SALT_TO_IONS[name]
+            cat_info = _compute_molecule_info(COMMON_NAME_TO_SMILES.get(cat, cat))
+            ani_info = _compute_molecule_info(COMMON_NAME_TO_SMILES.get(ani, ani))
+            salt_mw = cat_info["molar_weight"] + ani_info["molar_weight"]
+            moles = wf / salt_mw
+            if cation_info is None:
+                cation_name = cat
+                cation_info = cat_info
+                cation_info["name"] = cat
+            anion_moles[ani] = anion_moles.get(ani, 0.0) + moles
+            if ani not in anion_name_list:
+                anion_name_list.append(ani)
+
+    if cation_info is None or cation_name is None:
+        raise ValueError("No salt (cation) found in formulation.")
+
+    if "relative_moles" not in cation_info:
+        cation_info["relative_moles"] = sum(anion_moles.values())
+    anions: List[MolInfo] = []
+    for ani in anion_name_list:
+        ainfo = _compute_molecule_info(COMMON_NAME_TO_SMILES.get(ani, ani))
+        ainfo["name"] = ani
+        ainfo["relative_moles"] = anion_moles[ani]
+        anions.append(ainfo)
+
+    return _build_box_from_relative_moles(solvents, solvent_names, cation_info, cation_name, anions, anion_name_list,
+                                          temperature)
+
+
+def get_weight_fractions_from_molecule_counts(smi_to_count: Dict[str, int]) -> Dict[str, float]:
+    """Get weight fractions from molecule counts.
+
+    :param smi_to_count: SMILES to molecule count dictionary.
+    :return: Weight fraction dictionary.
+    """
+    weights = [_compute_molecule_info(smi)["molar_weight"] * count for smi, count in smi_to_count.items()]
+    total_weight = sum(weights)
+    return {smi: weight / total_weight for smi, weight in zip(smi_to_count.keys(), weights)}
+
+
+__all__ = ["build_simulation_box_config", "build_config_from_weight_fractions"]
