@@ -1,5 +1,5 @@
 from tools.formulation import (build_simulation_box_config, build_config_from_weight_fractions,
-                               get_weight_fractions_from_molecule_counts)
+                               build_config_from_weight_fractions_no_opt, get_weight_fractions_from_molecule_counts)
 
 
 def test_build_simulation_box_config():
@@ -32,27 +32,7 @@ def _format_data(data: list[tuple[str, str, float]]) -> tuple[dict[str, float], 
 
 
 def test_build_config_from_weight_fractions():
-    data1 = [
-        ("Solvent", "EC", 10),
-        ("Solvent", "EMC", 75),
-        ("Salt", "LiPF6", 12),
-        ("Additive", "FEC", 2),
-        ("Additive", "LiDFP", 1),
-    ]
-
-    config = build_config_from_weight_fractions(*_format_data(data1))
-    assert config["natoms"] == 10008
-    assert config["components"] == {"EMC": 562, "EC": 89, "FEC": 15, "Li": 69, "PF6": 62, "DFP": 7}
-    assert config["smiles"] == {
-        "EC": "O=C1OCCO1",
-        "EMC": "CCOC(=O)OC",
-        "FEC": "O=C1OCC(F)O1",
-        "PF6": "F[P-](F)(F)(F)(F)F",
-        "DFP": "O=P([O-])(F)F",
-        "Li": "[Li+]"
-    }
-
-    test_data2 = [
+    test_data = [
         ("Solvent", "EC", 10),
         ("Solvent", "EMC", 75),
         ("Salt", "LiPF6", 12),
@@ -60,7 +40,7 @@ def test_build_config_from_weight_fractions():
         ("Additive", "FEC", 2),
         ("Additive", "LiDFP", 0.5),
     ]
-    config = build_config_from_weight_fractions(*_format_data(test_data2))
+    config = build_config_from_weight_fractions_no_opt(*_format_data(test_data))
     assert config["natoms"] == 10005
     assert config["components"] == {'EMC': 561, 'EC': 88, 'FEC': 15, 'VC': 5, 'Li': 66, 'PF6': 62, 'DFP': 4}
     assert config["smiles"] == {
@@ -71,4 +51,17 @@ def test_build_config_from_weight_fractions():
         'PF6': 'F[P-](F)(F)(F)(F)F',
         'DFP': 'O=P([O-])(F)F',
         'Li': '[Li+]'
+    }
+
+    config1 = build_config_from_weight_fractions(*_format_data(test_data), use_legacy_on_no_solution=False)
+    assert config1["natoms"] == 10105
+    assert config1["components"] == {'EMC': 567, 'EC': 89, 'FEC': 15, 'VC': 5, 'Li': 66, 'PF6': 62, 'DFP': 4}
+    assert config1["smiles"] == {
+        'EC': 'O=C1OCCO1',
+        'EMC': 'CCOC(=O)OC',
+        'Li': '[Li+]',
+        'PF6': 'F[P-](F)(F)(F)(F)F',
+        'VC': 'O=c1occo1',
+        'FEC': 'O=C1OCC(F)O1',
+        'DFP': 'O=P([O-])(F)F'
     }

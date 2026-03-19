@@ -5,6 +5,7 @@ into MD simulation box configurations.
 
 import warnings
 from enum import Enum
+from functools import lru_cache
 from typing import Any, Dict, List, Optional
 
 from rdkit import Chem
@@ -17,6 +18,21 @@ except ImportError:  # Python < 3.8
 
 # Target total atom count used to scale molecule numbers in the simulation box.
 TARGET_TOTAL_ATOMS = 10_000
+MIN_TOTAL_ATOMS = 8_000
+MAX_TOTAL_ATOMS = 15_000
+PREFER_SALTS_MIN = 40
+ALLOW_SALTS_MIN = 30
+
+
+def _linspace(start: float, stop: float, num: int) -> list[float]:
+    """Return evenly spaced floats including both endpoints."""
+    if num <= 1:
+        return [float(start)]
+    step = (stop - start) / float(num - 1)
+    return [start + i * step for i in range(num)]
+
+
+SCALE_MULTIPLIERS = sorted({round(v, 6) for v in (_linspace(0.70, 1.30, 61) + _linspace(0.90, 1.10, 81))})
 
 
 class FractionType(Enum):
@@ -87,6 +103,7 @@ SALT_TO_IONS: dict[str, tuple[str, str]] = {
 }
 
 
+@lru_cache(maxsize=256)
 def _compute_molecule_info(smiles_or_name: str) -> MolInfo:
     """Parse a SMILES string or common name into a :class:`MolInfo` dict.
 
@@ -209,7 +226,7 @@ def build_simulation_box_config(formulation_config: Dict[str, Any]) -> Dict[str,
     solvents: list[MolInfo] = []
     solvent_names: list[str] = []
     for i, smi in enumerate(solvent_smiles_list):
-        solvent = _compute_molecule_info(smi)
+        solvent = dict(_compute_molecule_info(smi))
         solvent["mole_fraction"] = solvent_fractions[i]
 
         if solvent["name"] is None:
@@ -230,7 +247,7 @@ def build_simulation_box_config(formulation_config: Dict[str, Any]) -> Dict[str,
     # Cation                                                               #
     # ------------------------------------------------------------------ #
     cation_name: str = formulation_config["cation_name"]
-    cation_info: MolInfo = _compute_molecule_info(cation_name)
+    cation_info: MolInfo = dict(_compute_molecule_info(cation_name))
     cation_info["name"] = cation_name
 
     cation_charge: int = cation_info["charge"]
@@ -247,7 +264,7 @@ def build_simulation_box_config(formulation_config: Dict[str, Any]) -> Dict[str,
 
     anions: list[MolInfo] = []
     for i, name in enumerate(anion_name_list):
-        anion = _compute_molecule_info(name)
+        anion = dict(_compute_molecule_info(name))
         anion["name"] = name
         anion["anion_frac"] = raw_anion_fractions[i]
         anions.append(anion)
@@ -356,29 +373,228 @@ def _build_box_from_relative_moles(
     return output
 
 
-def build_config_from_weight_fractions(
+def build_config_from_weight_fractions(name_to_weight_fractions: Dict[str, float],
+                                       component_roles: Dict[str, str],
+                                       temperature: int = 298,
+                                       use_legacy_on_no_solution: bool = True) -> Dict[str, Any]:
+    """Build a simulation box from component weight fractions using constrained search.
+
+    The input fractions may sum to 1 or 100 and are normalised automatically.
+    Each component is converted to relative moles from weight and molecular
+    weight. Salt components are expanded into ions with :data:`SALT_TO_IONS`,
+    where salt moles are ``w_salt / (MW_cation + MW_anion)``.
+
+    The function then searches a grid of scale factors and chooses the best
+    integer molecule counts by minimising:
+
+    - hard constraints (priority order):
+      1) salt count shortfall below ``ALLOW_SALTS_MIN``
+      2) atom-count violation outside ``[MIN_TOTAL_ATOMS, MAX_TOTAL_ATOMS]``
+      3) soft salt shortfall below ``PREFER_SALTS_MIN``
+    - soft score: weighted weight-fraction error + atom-count deviation from
+      :data:`TARGET_TOTAL_ATOMS`
+
+    Charge neutrality is enforced per candidate by adjusting the dominant
+    counter-ion count as needed.
+
+    :param name_to_weight_fractions: Component name -> weight fraction.
+        Fractions are expected as 0..1 or 0..100 and are normalised internally.
+    :param component_roles: Component name -> role string, typically one of
+        ``"Solvent"``, ``"Additive"``, ``"Salt"``, ``"Cation"``, ``"Anion"``.
+        Unknown/missing roles default to ``"Solvent"`` behavior.
+    :param temperature: Simulation temperature in K.
+    :param use_legacy_on_no_solution: If True, fall back to legacy scaling
+        logic when constrained search cannot find a valid candidate.
+    :return: Dict with:
+        - ``temperature`` (int)
+        - ``natoms`` (int)
+        - ``components`` (dict[str, int]): molecule counts by component name
+        - ``smiles`` (dict[str, str]): component SMILES by component name
+    :raises ValueError: If no active components exist, no ionic species are
+        present, or no valid candidate can be found (and fallback is disabled).
+    """
+    total_frac = sum(name_to_weight_fractions.values())
+    if abs(total_frac - 1.0) > 1e-3:
+        if abs(total_frac - 100.0) < 1e-3:
+            name_to_weight_fractions = {k: v / 100.0 for k, v in name_to_weight_fractions.items()}
+        else:
+            name_to_weight_fractions = {k: v / total_frac for k, v in name_to_weight_fractions.items()}
+
+    # Build species-level targets and relative moles.
+    # Salt entries (e.g. LiPF6) are expanded into cation + anion species.
+    species_info: Dict[str, MolInfo] = {}
+    species_relative_moles: Dict[str, float] = {}
+    species_target_wf: Dict[str, float] = {}
+    species_is_salt: Dict[str, bool] = {}
+
+    def _add_species(name: str, wf: float, is_salt: bool, *, rel_moles: Optional[float] = None) -> None:
+        info = dict(_compute_molecule_info(COMMON_NAME_TO_SMILES.get(name, name)))
+        species_name = (info.get("name") or name) if not is_salt else name
+        info["name"] = species_name
+        species_info.setdefault(species_name, info)
+        species_target_wf[species_name] = species_target_wf.get(species_name, 0.0) + wf
+        species_is_salt[species_name] = species_is_salt.get(species_name, False) or is_salt
+        if rel_moles is None:
+            rel_moles = wf / float(info["molar_weight"])
+        species_relative_moles[species_name] = species_relative_moles.get(species_name, 0.0) + rel_moles
+
+    for comp_name, wf in name_to_weight_fractions.items():
+        if wf <= 0:
+            continue
+        role = (component_roles.get(comp_name) or "Solvent").strip().lower()
+        is_salt_role = role == "salt" or (role in ("solvent", "additive") and comp_name in SALT_TO_IONS)
+
+        if is_salt_role:
+            if comp_name not in SALT_TO_IONS:
+                raise ValueError(f"Unknown salt name: {comp_name!r}. Add to :data:`SALT_TO_IONS`.")
+            cation, anion = SALT_TO_IONS[comp_name]
+            cation_info = _compute_molecule_info(COMMON_NAME_TO_SMILES.get(cation, cation))
+            anion_info = _compute_molecule_info(COMMON_NAME_TO_SMILES.get(anion, anion))
+            salt_mw = float(cation_info["molar_weight"]) + float(anion_info["molar_weight"])
+            moles = wf / salt_mw
+            _add_species(cation, wf * float(cation_info["molar_weight"]) / salt_mw, True, rel_moles=moles)
+            _add_species(anion, wf * float(anion_info["molar_weight"]) / salt_mw, True, rel_moles=moles)
+            continue
+
+        _add_species(comp_name, wf, role in ("cation", "anion"))
+
+    active = [n for n, m in species_relative_moles.items() if m > 0]
+    if not active:
+        raise ValueError("No active components found from weight fractions.")
+
+    cation_names = [n for n in active if int(species_info[n]["charge"]) > 0]
+    anion_names = [n for n in active if int(species_info[n]["charge"]) < 0]
+    if not cation_names or not anion_names:
+        raise ValueError("Both cation and anion species are required to build an electrolyte box.")
+
+    atom_per_scale = sum(species_relative_moles[n] * int(species_info[n]["num_atoms"]) for n in active)
+    if atom_per_scale <= 0:
+        raise ValueError("Invalid component set: atom-per-scale is non-positive.")
+
+    salt_per_scale = sum(species_relative_moles[n] for n in cation_names if species_is_salt.get(n, False))
+    target_atoms = TARGET_TOTAL_ATOMS
+    scale0 = target_atoms / atom_per_scale
+
+    candidate_scales: set[float] = set()
+    for m in SCALE_MULTIPLIERS:
+        s = scale0 * float(m)
+        if s > 0:
+            candidate_scales.add(round(s, 8))
+
+    if salt_per_scale > 0:
+        for center in (ALLOW_SALTS_MIN / salt_per_scale, PREFER_SALTS_MIN / salt_per_scale):
+            for m in _linspace(0.80, 1.25, 46):
+                s = center * float(m)
+                if s > 0:
+                    candidate_scales.add(round(s, 8))
+
+    for center in (MIN_TOTAL_ATOMS / atom_per_scale, MAX_TOTAL_ATOMS / atom_per_scale):
+        for m in _linspace(0.90, 1.10, 21):
+            s = center * float(m)
+            if s > 0:
+                candidate_scales.add(round(s, 8))
+
+    best: Optional[Dict[str, Any]] = None
+    primary_cation = max(cation_names, key=lambda n: species_relative_moles[n])
+    primary_anion = max(anion_names, key=lambda n: species_relative_moles[n])
+
+    def _evaluate(scale: float) -> Optional[Dict[str, Any]]:
+        counts = {n: max(int(round(scale * species_relative_moles[n])), 1) for n in active}
+        net_charge = sum(counts[n] * int(species_info[n]["charge"]) for n in active)
+
+        if net_charge > 0:
+            anion_charge = int(species_info[primary_anion]["charge"])
+            if anion_charge >= 0:
+                return None
+            while net_charge > 0:
+                counts[primary_anion] += 1
+                net_charge += anion_charge
+        elif net_charge < 0:
+            cation_charge = int(species_info[primary_cation]["charge"])
+            if cation_charge <= 0:
+                return None
+            while net_charge < 0:
+                counts[primary_cation] += 1
+                net_charge += cation_charge
+
+        total_atoms = int(sum(counts[n] * int(species_info[n]["num_atoms"]) for n in active))
+        total_salts = int(sum(counts[n] for n in cation_names if species_is_salt.get(n, False)))
+
+        masses = {n: counts[n] * float(species_info[n]["molar_weight"]) for n in active}
+        total_mass = float(sum(masses.values()))
+        if total_mass <= 0:
+            return None
+
+        wt_ach = {n: masses[n] / total_mass for n in active}
+        abs_errs = [abs(wt_ach[n] - species_target_wf.get(n, 0.0)) * 100.0 for n in active]
+        max_abs_err = max(abs_errs) if abs_errs else 0.0
+        mean_abs_err = sum(abs_errs) / len(abs_errs) if abs_errs else 0.0
+
+        hard_salt = max(0, ALLOW_SALTS_MIN - total_salts) if salt_per_scale > 0 else 0
+        hard_atoms = max(0, MIN_TOTAL_ATOMS - total_atoms) + max(0, total_atoms - MAX_TOTAL_ATOMS)
+        soft_salt = max(0, PREFER_SALTS_MIN - total_salts) if salt_per_scale > 0 else 0
+        hard = (int(hard_salt), int(hard_atoms), int(soft_salt))
+
+        atom_dev = abs(total_atoms - target_atoms) / max(1.0, float(target_atoms))
+        soft = 2.0 * max_abs_err + 1.0 * mean_abs_err + 1.2 * atom_dev
+
+        return {
+            "hard": hard,
+            "soft": soft,
+            "counts": counts,
+            "total_atoms": total_atoms,
+        }
+
+    for scale in sorted(candidate_scales):
+        cand = _evaluate(scale)
+        if cand is None:
+            continue
+        if best is None or (cand["hard"], cand["soft"]) < (best["hard"], best["soft"]):
+            best = cand
+
+    if best is None:
+        if use_legacy_on_no_solution:
+            warnings.warn(
+                "Constrained search found no valid candidate; falling back to legacy builder.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return build_config_from_weight_fractions_no_opt(
+                name_to_weight_fractions=name_to_weight_fractions,
+                component_roles=component_roles,
+                temperature=temperature,
+            )
+        raise ValueError("Failed to build a valid configuration from weight fractions.")
+
+    counts = best["counts"]
+    smiles = {n: str(species_info[n]["smiles"]) for n in active}
+
+    solvent_out = [n for n in active if int(species_info[n]["charge"]) == 0]
+    cation_out = [n for n in active if int(species_info[n]["charge"]) > 0]
+    anion_out = [n for n in active if int(species_info[n]["charge"]) < 0]
+    sort_key = lambda n: (-counts[n], n)
+    components = ({
+        n: counts[n] for n in sorted(solvent_out, key=sort_key)
+    } | {
+        n: counts[n] for n in sorted(cation_out, key=sort_key)
+    } | {
+        n: counts[n] for n in sorted(anion_out, key=sort_key)
+    })
+
+    return {
+        "temperature": int(temperature),
+        "natoms": int(best["total_atoms"]),
+        "components": components,
+        "smiles": smiles,
+    }
+
+
+def build_config_from_weight_fractions_no_opt(
     name_to_weight_fractions: Dict[str, float],
     component_roles: Dict[str, str],
     temperature: int = 298,
 ) -> Dict[str, Any]:
-    """Build simulation box config directly from weight fractions (sum=1 or sum=100).
-
-    Uses the same scaling and charge-neutrality logic as
-    :func:`build_simulation_box_config`, but derives relative moles from weight
-    fractions only: for each component, relative_moles = weight_fraction / molar_weight.
-    Salts are expanded into cation + anion via :data:`SALT_TO_IONS`; cation and
-    anion relative_moles come from the salt moles (salt_w / M_salt).
-
-    :param name_to_weight_fractions: Component name -> weight fraction (will be
-        normalised if sum != 1).
-    :param component_roles: Component name -> ``"Solvent"``, ``"Additive"``,
-        ``"Salt"``, ``"Cation"``, or ``"Anion"``. ``"Cation"``/``"Anion"`` use
-        weight fraction directly (relative_moles = w/M); ``"Salt"`` uses
-        :data:`SALT_TO_IONS` to expand into cation + anion(s).
-    :param temperature: Simulation temperature in K.
-    :return: Dict with ``temperature``, ``natoms``, ``components`` (int counts),
-        ``smiles``; same as :func:`build_simulation_box_config`.
-    """
+    """Legacy conversion path kept as fallback for hard edge cases."""
     total_frac = sum(name_to_weight_fractions.values())
     if abs(total_frac - 1.0) > 1e-3:
         if abs(total_frac - 100.0) < 1e-3:
@@ -397,7 +613,7 @@ def build_config_from_weight_fractions(
         role = component_roles.get(name, "Solvent")
         is_salt = role == "Salt" or (role in ("Solvent", "Additive") and "Li" in name)
         if role == "Cation":
-            info = _compute_molecule_info(COMMON_NAME_TO_SMILES.get(name, name))
+            info = dict(_compute_molecule_info(COMMON_NAME_TO_SMILES.get(name, name)))
             if info["charge"] <= 0:
                 raise ValueError(f"Cation {name!r} has non-positive charge.")
             if cation_info is None:
@@ -409,13 +625,13 @@ def build_config_from_weight_fractions(
                 cation_info["relative_moles"] = cation_info.get("relative_moles", 0.0) + wf / info["molar_weight"]
             continue
         if role == "Anion":
-            info = _compute_molecule_info(COMMON_NAME_TO_SMILES.get(name, name))
+            info = dict(_compute_molecule_info(COMMON_NAME_TO_SMILES.get(name, name)))
             anion_moles[name] = anion_moles.get(name, 0.0) + wf / info["molar_weight"]
             if name not in anion_name_list:
                 anion_name_list.append(name)
             continue
         if not is_salt:
-            info = _compute_molecule_info(COMMON_NAME_TO_SMILES.get(name, name))
+            info = dict(_compute_molecule_info(COMMON_NAME_TO_SMILES.get(name, name)))
             info["name"] = info.get("name") or f"S{len(solvent_names):02d}"
             info["relative_moles"] = wf / info["molar_weight"]
             solvent_names.append(info["name"])
@@ -430,7 +646,7 @@ def build_config_from_weight_fractions(
             moles = wf / salt_mw
             if cation_info is None:
                 cation_name = cat
-                cation_info = cat_info
+                cation_info = dict(cat_info)
                 cation_info["name"] = cat
             anion_moles[ani] = anion_moles.get(ani, 0.0) + moles
             if ani not in anion_name_list:
@@ -443,7 +659,7 @@ def build_config_from_weight_fractions(
         cation_info["relative_moles"] = sum(anion_moles.values())
     anions: List[MolInfo] = []
     for ani in anion_name_list:
-        ainfo = _compute_molecule_info(COMMON_NAME_TO_SMILES.get(ani, ani))
+        ainfo = dict(_compute_molecule_info(COMMON_NAME_TO_SMILES.get(ani, ani)))
         ainfo["name"] = ani
         ainfo["relative_moles"] = anion_moles[ani]
         anions.append(ainfo)
