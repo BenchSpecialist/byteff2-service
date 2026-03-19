@@ -46,7 +46,7 @@ class MolInfo(TypedDict, total=False):
     anion_frac: float  # anion molar fraction relative to total cation moles
 
 
-# Map common names to canonical smiles (RDKit format)
+# Map common names to CANONICAL smiles (RDKit format)
 COMMON_NAME_TO_SMILES: dict[str, str] = {
     # Cations
     "Li": "[Li+]",
@@ -58,10 +58,10 @@ COMMON_NAME_TO_SMILES: dict[str, str] = {
     "DFP": 'O=P(F)(F)[O-]',  # Difluorophosphate
     # Solvents
     'DMC': 'COC(=O)OC',
-    'EC': 'O=C1OCCO1',
-    'EMC': 'CCOC(=O)OC',
-    'DEC': 'CCOC(=O)OCC',
-    'CBS': 'O=C1OC(C2COS(=O)(=O)O2)C(O1)C1COS(=O)(=O)O1',
+    'EC': 'O=C1OCCO1',  # Ethylene carbonate
+    'EMC': 'CCOC(=O)OC',  # Ethyl methyl carbonate
+    'DEC': 'CCOC(=O)OCC',  # Diethyl carbonate
+    "CBS": "O=C1OC(C2COS(=O)(=O)O2)C(C2COS(=O)(=O)O2)O1",
     "PC": "CC1OCC(=O)O1",  # Propylene carbonate
     "DMSO": "CS(C)=O",  # Dimethyl sulfoxide
     "THF": "C1CCOC1",  # Tetrahydrofuran
@@ -69,9 +69,14 @@ COMMON_NAME_TO_SMILES: dict[str, str] = {
     "DOL": "CC1OCCO1",  # 1,3-Dioxolane
     "GBL": "O=C1CCCO1",  # γ-Butyrolactone
     "MeCN": "CC#N",  # Acetonitrile
+    "EP": "CCOC(=O)CC",  # Ethyl Propionate
     # Additives (often also solvents)
-    "FEC": "O=C1OC(F)CO1",  # Fluoroethylene carbonate
-    "VC": "O=C1OC=CO1",  # Vinylene carbonate
+    "VC": "O=c1occo1",  # Vinylene carbonate
+    "FEC": "O=C1OCC(F)O1",  # Fluoroethylene carbonate
+    "DFP": "O=P([O-])(F)F",  # difluorophosphate anion
+    "PS": "O=S1(=O)CCCO1",  # 1,3-Propane sultone
+    "DTD": "O=S1(=O)OCCO1",  # 1,3,2-Dioxathiolane 2,2-dioxide
+    "DMSF": "COS(=O)OC",  # Dimethyl sulfite
 }
 
 # Map canonical smiles to common names
