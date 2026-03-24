@@ -34,6 +34,12 @@ PROGRESS_UPDATE_INTERVAL = int(os.environ.get("PROGRESS_UPDATE_INTERVAL", 3600))
 # cause error in post-analysis) for quick testing
 DEBUG_TOTAL_STEPS = os.environ.get("DEBUG_TOTAL_STEPS")
 
+STAGE_TO_TOTAL_STEPS = {
+    "NPT": os.environ.get("NPT_STEPS") or TransportProtocol.STAGE_TO_TOTAL_STEPS["NPT"],
+    "NVT": os.environ.get("NVT_STEPS") or TransportProtocol.STAGE_TO_TOTAL_STEPS["NVT"],
+    "NEMD": os.environ.get("NEMD_STEPS") or TransportProtocol.STAGE_TO_TOTAL_STEPS["NEMD"],
+}
+
 
 def cleanup_on_exit():
     """Clean up directories on exit"""
@@ -93,10 +99,10 @@ def main():
         print(f'WARNING: Set total steps in NPT, NVT and NEMD to {_total_steps} for quick testing. '
               'Note that using a small value for total steps will likely cause errors in post-analysis.')
     else:
-        config["npt_steps"] = TransportProtocol.STAGE_TO_TOTAL_STEPS["NPT"]
-        config["nvt_steps"] = TransportProtocol.STAGE_TO_TOTAL_STEPS["NVT"]
-        config["nonequ_steps"] = TransportProtocol.STAGE_TO_TOTAL_STEPS["NEMD"]
-        print(f'Using default total steps for TransportProtocol:\n'
+        config["npt_steps"] = STAGE_TO_TOTAL_STEPS["NPT"]
+        config["nvt_steps"] = STAGE_TO_TOTAL_STEPS["NVT"]
+        config["nonequ_steps"] = STAGE_TO_TOTAL_STEPS["NEMD"]
+        print(f'Total steps used for each stage in TransportProtocol:\n'
               f'- NPT: {config["npt_steps"]:_} steps\n'
               f'- NVT: {config["nvt_steps"]:_} steps\n'
               f'- NEMD: {config["nonequ_steps"]:_} steps')

@@ -338,9 +338,14 @@ class DensityProtocol(Protocol):
 class TransportProtocol(Protocol):
     # Default total steps in each MD stage for TransportProtocol
     STAGE_TO_TOTAL_STEPS = {
-        "NPT": 4_000_000,
-        "NVT": 10_000_000,
-        "NEMD": 1_000_000,
+        "NPT": 2_000_000,  # 4 ns
+        "NVT": 5_000_000,  # 10 ns
+        "NEMD": 1_000_000,  # 1 ns
+    }
+    STAGE_TO_TOTAL_STEPS_LONG = {
+        "NPT": 4_000_000,  # 8 ns
+        "NVT": 10_000_000,  # 20 ns
+        "NEMD": 1_000_000,  # 1 ns
     }
 
     def __init__(self, config: dict):
