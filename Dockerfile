@@ -52,7 +52,9 @@ WORKDIR /app
 
 # Install only runtime system dependencies
 # We include python3, gromacs, and the shared libraries you listed
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN rm -rf /var/lib/apt/lists/* \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \
     libxext6 \
@@ -60,6 +62,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxrender1 \
     gromacs \
     git \
+    vim \
     && rm -rf /var/lib/apt/lists/*
 
 # Verify GROMACS installation
