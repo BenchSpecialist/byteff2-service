@@ -365,8 +365,8 @@ def fsc_full_Lambda(dfsc: Union[float, torch.Tensor],
 unit = OnsagerUnit()
 
 
-def onsager_calc(species_mass, species_number, species_charge, volume_angstrom3, viscosity_cP, T_K, positions):
-
+def onsager_calc(species_order, species_mass, species_number, species_charge, volume_angstrom3, viscosity_cP, T_K,
+                 positions):
     dtype = torch.float64
     nsp = len(species_mass)
     mol_mass_list, atom_mfrac_list, gro_mass_list, natom_list = [], [], [], []
@@ -377,11 +377,16 @@ def onsager_calc(species_mass, species_number, species_charge, volume_angstrom3,
         atom_mfrac_list.append([atomic_mass / mol_mass for atomic_mass in mass_list])
         natom_list.append(len(mass_list))
     gro_range0 = 0
-    for reversed_key in reversed(species_mass.keys()):
-        gro_mass_list.extend(species_mass[reversed_key] * species_number[reversed_key])
-        gro_range_list.append([gro_range0, gro_range0 + len(species_mass[reversed_key]) * species_number[reversed_key]])
-        gro_range0 += len(species_mass[reversed_key]) * species_number[reversed_key]
-    gro_range_list.reverse()
+    # for reversed_key in reversed(species_mass.keys()):
+    #     gro_mass_list.extend(species_mass[reversed_key] * species_number[reversed_key])
+    #     gro_range_list.append([gro_range0, gro_range0 + len(species_mass[reversed_key]) * species_number[reversed_key]])
+    #     gro_range0 += len(species_mass[reversed_key]) * species_number[reversed_key]
+    # gro_range_list.reverse()
+
+    for sp in species_order:
+        gro_mass_list.extend(species_mass[sp] * species_number[sp])
+        gro_range_list.append([gro_range0, gro_range0 + len(species_mass[sp]) * species_number[sp]])
+        gro_range0 += len(species_mass[sp]) * species_number[sp]
 
     Masses = torch.tensor(mol_mass_list, dtype=dtype)
     AtomMFrac = [torch.tensor(l, dtype=dtype) for l in atom_mfrac_list]

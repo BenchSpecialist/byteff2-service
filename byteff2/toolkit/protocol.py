@@ -4,6 +4,7 @@ import shutil
 import subprocess
 from enum import Enum
 from pathlib import Path
+from typing import OrderedDict
 
 import ase.io as aio
 import numpy as np
@@ -122,15 +123,13 @@ def load_topo(topo_dir, mol_name):
 
 
 def generate_system_gro(components, working_dir, box):
-    solvent = [c for c in components.values() if c.type == ComponentType.SOLVENT]
-    cation = [c for c in components.values() if c.type == ComponentType.CATION]
-    anion = [c for c in components.values() if c.type == ComponentType.ANION]
     script = GMXScript()
     script.add('cd "$(dirname "$0")" ')
-    for i, c in enumerate(solvent):
+
+    for i, c in enumerate(components.values()):
         # Generate the box from the first component
         if i == 0:
-            # Generate the box for solvent
+            # Generate the box for components
             script.init_gro_box(f"{c.name}.gro", box)
             rest_molecules = c.molar_num - 1
             if rest_molecules:
@@ -138,11 +137,6 @@ def generate_system_gro(components, working_dir, box):
             continue
         script.insert_molecules(f"{c.name}.gro", c.molar_num)
 
-    # Add cation and anion
-    for c in cation:
-        script.insert_molecules(f"{c.name}.gro", c.molar_num)
-    for c in anion:
-        script.insert_molecules(f"{c.name}.gro", c.molar_num)
     # Add run md run command
     script.finish()
     script.write(f'{working_dir}/run_gmx.sh')
@@ -188,12 +182,23 @@ class Protocol:
         logger.info(f'building system for {components_ratio.keys()}')
         # read and parse topo files
         os.makedirs(working_dir, exist_ok=True)
-        components = {}
+        components_temp = dict()
         full_system_records, record_atomtype_names = [], []
         system_charge = 0
         for component_name, molar_ratio in components_ratio.items():
             component = load_topo(self.params_dir, component_name)
             component.molar_ratio = molar_ratio
+            components_temp[component_name] = component
+        components_temp = {
+            k: v for k, v in sorted(components_temp.items(), key=lambda item: item[1].molar_ratio, reverse=True)
+        }
+        solvent = [k for k, v in components_temp.items() if v.type == ComponentType.SOLVENT]
+        anion = [k for k, v in components_temp.items() if v.type == ComponentType.ANION]
+        cation = [k for k, v in components_temp.items() if v.type == ComponentType.CATION]
+        component_order = solvent + anion + cation
+        components = OrderedDict()
+        for component_name in component_order:
+            component = components_temp[component_name]
             components[component_name] = component
             for record in component.atp_records.all:
                 if isinstance(record, RecordAtomType):
@@ -219,7 +224,8 @@ class Protocol:
             lines.append(" 100.00000 100.00000 100.00000\n")
             with open(f'{working_dir}/solvent_salt_gas.gro', 'w') as new_gro_f:
                 new_gro_f.writelines(lines)
-        input_mol_ratio = np.array(list(components_ratio.values()))
+
+        input_mol_ratio = np.array(list(c.molar_ratio for c in components.values()))
         real_total_atoms, mix = search_mixture(input_mol_ratio, total_atoms, total_atoms + 1000, components)
 
         full_topparse.molecules = []
@@ -232,7 +238,7 @@ class Protocol:
 
         init_density = predict_density(components)
         init_box = predict_box(components, init_density)
-        components = {k: v for k, v in sorted(components.items(), key=lambda item: item[1].molar_num, reverse=True)}
+
         itp_list = [f'{mol_name}.itp' for mol_name in components.keys()]
         atp_list = [f'{mol_name}.atp' for mol_name in components.keys()]
         mols = [[i] for i in range(len(components))]
@@ -425,23 +431,18 @@ class TransportProtocol(Protocol):
                 cation.append(mol_name)
             elif topo_mol.type == ComponentType.ANION:
                 anion.append(mol_name)
-        sorted_components_names = anion + cation + solvent
 
-        csv_file = Path(self.output_dir) / 'npt_state.csv'
+        # Density calculation
+        csv_file = os.path.join(self.output_dir, 'npt_state.csv')
         density = pd.read_csv(csv_file)["Density (g/mL)"]
-
         dd = []
         for _ in range(10):
             dd.append(np.mean(np.random.choice(density[-1000:], 100)))
-
         density = np.mean(dd)
 
-        # keep solvent at the end
-        species_charges_dict = {k: species_charges_dict[k] for k in sorted_components_names}
-        species_mass_dict = {k: species_mass_dict[k] for k in sorted_components_names}
-        species_number_dict = {k: species_number_dict[k] for k in sorted_components_names}
-
+        species_order = list(self.components.keys())
         onsager_result = onsager_calc(
+            species_order,
             species_mass_dict,
             species_number_dict,
             species_charges_dict,
@@ -454,7 +455,7 @@ class TransportProtocol(Protocol):
         diffusion_data = [{
             "species": name,
             "diffusion_coefficient_1e-10_m2_s": onsager_result["Dself_inf"][i]
-        } for i, name in enumerate(sorted_components_names)]
+        } for i, name in enumerate(species_order)]
 
         results = {
             "system_properties": {
@@ -468,8 +469,12 @@ class TransportProtocol(Protocol):
         result = calc_solvation_cluster_distribution(species_mass_dict, species_number_dict, anion, cation, md_volume,
                                                      nvt_positions)
         results.update(**result)
+        # Dump other onsager items
+        results['conductivity_NE'] = onsager_result["conductivity_NE"]
+        results['cubic_box_length [angstrom]'] = onsager_result["cubic_box_length"]
+        results["components"] = species_order
 
-        with open(Path(self.output_dir) / 'results_mu.json', 'w') as f:
+        with open(os.path.join(self.output_dir, 'results_mu.json'), 'w') as f:
             json.dump(results, f, indent=4)
 
 
