@@ -1,7 +1,7 @@
 # ==========================================
 # Stage 1: Builder (Compilers & Tools)
 # ==========================================
-FROM nvidia/cuda:12.8.1-devel-ubuntu22.04 AS builder
+FROM nvidia/cuda:12.6.0-devel-ubuntu22.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /app
@@ -37,7 +37,6 @@ RUN GIT_COMMITTER_NAME="Builder" GIT_COMMITTER_EMAIL="builder@example.com" \
 COPY ./requirements.txt .
 
 RUN pip3 install --no-cache-dir -r /app/requirements.txt \
-    --extra-index-url https://download.pytorch.org/whl/cu128 \
     && rm /app/requirements.txt
 
 
@@ -45,7 +44,7 @@ RUN pip3 install --no-cache-dir -r /app/requirements.txt \
 # Stage 2: Runtime (Final Image)
 # ==========================================
 # Use the 'runtime' tag (much smaller than 'devel')
-FROM nvidia/cuda:12.8.1-runtime-ubuntu22.04
+FROM nvidia/cuda:12.6.0-runtime-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /app
