@@ -24,11 +24,6 @@ from bytemol.utils import get_data_file_path, setup_default_logging
 
 logger = setup_default_logging()
 
-from job_util import JobStatus, Progress, get_backend
-
-_backend = get_backend()
-update_progress = _backend.update_progress
-
 
 class ComponentType(Enum):
     SOLVENT = 0
@@ -377,10 +372,6 @@ class TransportProtocol(Protocol):
             nonbonded_params,
             unit_cell,
         )
-        update_progress(
-            Progress(task_name=self.config['task_name'],
-                     status=JobStatus.RUNNING,
-                     message='Simulation box constructed; NPT equilibration run started.'))
         logger.info('Starting NPT run')
         npt_positions, npt_box_vec = npt_run(
             input_top,
