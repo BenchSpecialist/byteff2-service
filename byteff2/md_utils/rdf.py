@@ -1,41 +1,22 @@
+import gc
+import os
+
 import torch
-from functools import wraps
-from typing import Dict, List, Any, Callable, Tuple
+from typing import Dict, List, Any, Tuple
 
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+from tools.profile import track_gpu_memory, track_cpu_memory
 
-_DEFAULT_CUTOFF = 6.  # angstrom
+_DEVICE_ENV_STR = os.environ.get("DEVICE_ENV", "cpu")
+DEVICE = torch.device(_DEVICE_ENV_STR.lower())
+
+_DEFAULT_CUTOFF = 6.  # angstroms
 
 
-def track_gpu_memory(func: Callable) -> Callable:
-
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            initial_memory = torch.cuda.memory_allocated() / 1024**2  # MB
-            max_memory_before = torch.cuda.max_memory_allocated() / 1024**2
-
-            print(f"[{func.__name__}] Initial GPU memory: {initial_memory:.2f} MB")
-
-            result = func(*args, **kwargs)
-
-            peak_memory = torch.cuda.max_memory_allocated() / 1024**2  # MB
-            final_memory = torch.cuda.memory_allocated() / 1024**2
-            memory_used = peak_memory - max_memory_before
-
-            print(f"[{func.__name__}] Peak GPU memory: {peak_memory:.2f} MB")
-            print(f"[{func.__name__}] Final GPU memory: {final_memory:.2f} MB")
-            print(f"[{func.__name__}] Memory used by function: {memory_used:.2f} MB")
-
-            # Reset peak memory tracking
-            torch.cuda.reset_peak_memory_stats()
-        else:
-            result = func(*args, **kwargs)
-
-        return result
-
-    return wrapper
+def _clear_memory() -> None:
+    """Release unused memory on both GPU and CPU."""
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 def get_cluster_category(cluster_size: int) -> str:
@@ -123,6 +104,7 @@ def calc_com_rdf_cn(
     return rdf_array.detach().cpu().tolist(), r_cut
 
 
+@track_cpu_memory
 @track_gpu_memory
 def calc_solvation_cluster_distribution(species_mass_dict: Dict[str, float],
                                         species_number_dict: Dict[str, int],
@@ -258,7 +240,7 @@ def calc_solvation_cluster_distribution(species_mass_dict: Dict[str, float],
 
     # Clear intermediate tensors to free up memory
     del com_tensor, weighted_positions, mol_index, nvt_positions_torch
-    torch.cuda.empty_cache()
+    _clear_memory()
 
     if use_default_cutoff:
         rdf_array, r_cut = None, _DEFAULT_CUTOFF
@@ -295,7 +277,7 @@ def calc_solvation_cluster_distribution(species_mass_dict: Dict[str, float],
 
         # Clear batch tensors
         del shift, com_tensor_distance, coordination_counts_batch, anion_com_batch, cation_com_batch
-        torch.cuda.empty_cache()
+        _clear_memory()
 
     # Concatenate all batches: (n_frames, n_cations)
     coordination_counts = torch.cat(coordination_counts_list, dim=0)
