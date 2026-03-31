@@ -11,6 +11,7 @@ Environment Variables Required:
 import os
 import json
 import logging
+import urllib.request
 from enum import Enum
 from io import BytesIO
 from pathlib import Path
@@ -58,6 +59,18 @@ class MinioFileManager:
             self.client = Minio(MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, secure=secure)
         except Exception as exc:
             raise RuntimeError(f"Failed to initialise MinIO client: {exc}") from exc
+
+    def check_health(self):
+        scheme = "https" if self.client._base_url.is_https else "http"
+        url = f"{scheme}://{MINIO_ENDPOINT}/minio/health/live"
+        try:
+            with urllib.request.urlopen(url, timeout=5) as resp:
+                if resp.status == 200:
+                    print("MinIO health check passed")
+                    return
+        except Exception:
+            pass
+        raise ConnectionError(f"MinIO not reachable at {url}")
 
     def ensure_bucket(self, bucket_name: str) -> None:
         """
@@ -191,7 +204,10 @@ def _get_manager() -> MinioFileManager:
     :raises ValueError: If required environment variables are not set.
     """
     secure = os.environ.get("MINIO_SECURE", "false").lower() == "true"
-    return MinioFileManager(secure=secure)
+    manager = MinioFileManager(secure=secure)
+    manager.check_health()
+    manager.ensure_bucket(BUCKET)
+    return manager
 
 
 def download_config(task_name: str, local_path: Optional[Path] = None) -> Dict[str, Any]:
