@@ -26,6 +26,7 @@ update_progress = _backend.update_progress
 cleanup_dirs = []
 
 WORKSPACE_DIR = os.environ.get("WORKSPACE_DIR", "/app/workspace")
+GRO_FILES_DIR = "gro_files"
 
 ## Environment variables
 # How often to update progress in seconds
@@ -144,6 +145,10 @@ def run_transport_protocol(config: dict):
                                        daemon=True)
     progress_thread.start()
 
+    # Start background gro file uploader as a daemon thread
+    gro_thread = threading.Thread(target=background_gro_uploader, args=(config, stop_event, 300), daemon=True)
+    gro_thread.start()
+
     try:
         md_protocol = TransportProtocol(config)
         md_protocol.run_protocol()
@@ -163,10 +168,11 @@ def run_transport_protocol(config: dict):
             cleanup_on_exit()
             sys.exit(1)
     finally:
-        # Signal the background thread to stop
+        # Signal the background threads to stop
         stop_event.set()
-        # Wait briefly for the thread to finish its last update
+        # Wait briefly for the threads to finish their last update
         progress_thread.join(timeout=10.0)
+        gro_thread.join(timeout=10.0)
 
 
 def get_completed_steps(csv_file: str) -> int:
@@ -220,6 +226,37 @@ def background_progress_updater(config: dict,
             print(f"Warning: Error in background progress updater: {e}", file=sys.stderr)
 
         # Wait for polling_interval seconds or until stop_event is set
+        stop_event.wait(timeout=polling_interval)
+
+
+def background_gro_uploader(config: dict, stop_event: threading.Event, polling_interval: int = 300):
+    """
+    Background daemon that watches for solvent*.gro files in the working directory.
+    When found, copies all *.gro files to a dedicated folder and uploads to S3.
+    Note that the daemon exits immediately once the .gro files have been uploaded,
+    so files in working_dir are not expected to change after that point.
+
+    :param config: Configuration dictionary containing task_name and working_dir
+    :param stop_event: threading.Event to signal when to stop polling
+    :param polling_interval: Interval in seconds between checks, default to 5 minutes
+    """
+    working_dir = Path(config["working_dir"])
+    gro_dest = Path(GRO_FILES_DIR)
+
+    while not stop_event.is_set():
+        try:
+            solvent_gros = list(working_dir.glob("solvent*.gro"))
+            if solvent_gros:
+                gro_dest.mkdir(parents=True, exist_ok=True)
+                for gro_file in working_dir.glob("*.gro"):
+                    shutil.copy2(gro_file, gro_dest)
+                upload_result(task_name=config["task_name"], file_or_dir_path=str(gro_dest))
+                print(f"Uploaded .gro files from {gro_dest} to S3")
+                shutil.rmtree(gro_dest, ignore_errors=True)
+                return
+        except Exception as e:
+            print(f"Warning: Error in background gro uploader: {e}", file=sys.stderr)
+
         stop_event.wait(timeout=polling_interval)
 
 
