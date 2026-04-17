@@ -4,6 +4,7 @@ import json
 import shutil
 import signal
 import polars
+import tarfile
 import argparse
 import threading
 from pathlib import Path
@@ -26,7 +27,7 @@ update_progress = _backend.update_progress
 cleanup_dirs = []
 
 WORKSPACE_DIR = os.environ.get("WORKSPACE_DIR", "/app/workspace")
-GRO_FILES_DIR = "gro_files"
+GRO_FILES_ARCHIVE = "gro_files.tar.gz"
 
 ## Environment variables
 # How often to update progress in seconds
@@ -232,27 +233,25 @@ def background_progress_updater(config: dict,
 def background_gro_uploader(config: dict, stop_event: threading.Event, polling_interval: int = 300):
     """
     Background daemon that watches for solvent*.gro files in the working directory.
-    When found, copies all *.gro files to a dedicated folder and uploads to S3.
-    Note that the daemon exits immediately once the .gro files have been uploaded,
-    so files in working_dir are not expected to change after that point.
+    When found, collects all *.gro files into a .tar.gz archive and uploads to S3.
 
     :param config: Configuration dictionary containing task_name and working_dir
     :param stop_event: threading.Event to signal when to stop polling
     :param polling_interval: Interval in seconds between checks, default to 5 minutes
     """
     working_dir = Path(config["working_dir"])
-    gro_dest = Path(GRO_FILES_DIR)
+    archive_path = Path(GRO_FILES_ARCHIVE)
 
     while not stop_event.is_set():
         try:
             solvent_gros = list(working_dir.glob("solvent*.gro"))
             if solvent_gros:
-                gro_dest.mkdir(parents=True, exist_ok=True)
-                for gro_file in working_dir.glob("*.gro"):
-                    shutil.copy2(gro_file, gro_dest)
-                upload_result(task_name=config["task_name"], file_or_dir_path=str(gro_dest))
-                print(f"Uploaded .gro files from {gro_dest} to S3")
-                shutil.rmtree(gro_dest, ignore_errors=True)
+                with tarfile.open(archive_path, "w:gz") as tar:
+                    for gro_file in working_dir.glob("*.gro"):
+                        tar.add(gro_file, arcname=gro_file.name)
+                upload_result(task_name=config["task_name"], file_or_dir_path=str(archive_path))
+                print(f"Uploaded {archive_path} to S3")
+                archive_path.unlink(missing_ok=True)
                 return
         except Exception as e:
             print(f"Warning: Error in background gro uploader: {e}", file=sys.stderr)
