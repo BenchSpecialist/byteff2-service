@@ -74,6 +74,9 @@ def predict_density(component: dict):
 
 
 def search_mixture(mol_ratio, min_atoms, max_atoms, components):
+    """
+    Search for the optimal mixture of components to achieve the desired total number of atoms.
+    """
     result = []
     num_atoms = np.array([len(component.atoms) for component in components.values()])
     atoms_ratio = mol_ratio * num_atoms
@@ -220,8 +223,13 @@ class Protocol:
             with open(f'{working_dir}/solvent_salt_gas.gro', 'w') as new_gro_f:
                 new_gro_f.writelines(lines)
 
-        input_mol_ratio = np.array(list(c.molar_ratio for c in components.values()))
-        real_total_atoms, mix = search_mixture(input_mol_ratio, total_atoms, total_atoms + 1000, components)
+        # input_mol_ratio = np.array(list(c.molar_ratio for c in components.values()))
+        # real_total_atoms, mix = search_mixture(input_mol_ratio, total_atoms, total_atoms + 1000, components)
+
+        # Treat input components values as exact molecule counts,
+        # as ratio_converter already scale total atoms to 10000
+        mix = np.array([components_ratio[name] for name in components.keys()], dtype=int)
+        real_total_atoms = int(np.sum(mix * np.array([len(c.atoms) for c in components.values()])))
 
         full_topparse.molecules = []
         box_charge = 0
